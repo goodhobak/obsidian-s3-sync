@@ -45,6 +45,8 @@ export interface PluginSettings {
   encryptionPassphrase: string;
   /** Keep this many old versions per file remotely; 0 disables version history. */
   versionsToKeep: number;
+  /** Write a detailed diagnostic log of sync runs to the plugin folder. */
+  developerMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -70,6 +72,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   encryptionEnabled: false,
   encryptionPassphrase: "",
   versionsToKeep: 5,
+  developerMode: false,
 };
 
 /** One entry in the remote manifest. */

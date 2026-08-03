@@ -188,6 +188,13 @@ export class S3Client {
     return out;
   }
 
+  /** List object keys under a prefix, relative to the configured key prefix. */
+  async listKeys(relativePrefix: string): Promise<string[]> {
+    const objs = await this.listObjects(relativePrefix);
+    const p = this.conn.prefix ? `${this.conn.prefix}/` : "";
+    return objs.map((o) => (p && o.key.startsWith(p) ? o.key.slice(p.length) : o.key));
+  }
+
   /** Cheap connectivity + credential probe. */
   async testConnection(): Promise<void> {
     const res = await this.send("GET", null, { "list-type": "2", "max-keys": "1", prefix: this.fullKey("") }, {});

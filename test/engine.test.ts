@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { MassDeleteAbortError, ManifestRollbackError, SyncEngine } from "../src/sync/engine";
 import { RemoteStore } from "../src/sync/remote-store";
+import { sha256Hex } from "../src/s3/sigv4";
 import { DEFAULT_SETTINGS, type SyncFilterSettings } from "../src/types";
 import { InMemoryIndexStore, InMemoryS3, InMemoryVault } from "./fakes";
 
@@ -580,6 +581,69 @@ describe("SyncEngine", () => {
 
     // 60 pulls with CHECKPOINT_EVERY=25 => at least 2 mid-run checkpoints + final save.
     expect(saves).toBeGreaterThanOrEqual(3);
+  });
+
+  it("migrates a legacy layout to content-addressed and GCs orphans", async () => {
+    const dev = makeDevice(s3);
+    await dev.remote.initialize();
+
+    // Seed a pre-dedup layout by hand: a live blob at files/note.md, a legacy
+    // history/<hash> object, an orphan blob, and a manifest pointing at them.
+    const liveContent = new TextEncoder().encode("live body").buffer as ArrayBuffer;
+    const liveHash = await sha256Hex(liveContent);
+    const oldContent = new TextEncoder().encode("older body").buffer as ArrayBuffer;
+    const oldHash = await sha256Hex(oldContent);
+    await s3.putObject("files/note.md", liveContent);
+    await s3.putObject(`history/${oldHash}`, oldContent);
+    await s3.putObject("blobs/orphan-xyz", new TextEncoder().encode("garbage").buffer as ArrayBuffer);
+    await dev.remote.saveManifest(
+      {
+        schemaVersion: 1,
+        revision: 1,
+        updatedAt: 1,
+        files: {
+          "note.md": {
+            hash: liveHash,
+            size: 9,
+            mtime: 1,
+            rev: 1,
+            blobKey: "files/note.md",
+            history: [{ hash: oldHash, size: 10, ts: 1 }],
+          },
+        },
+      },
+      null,
+    );
+
+    // Dry run reports but changes nothing.
+    const dry = await dev.engine.migrateStorage({ dryRun: true });
+    expect(dry.repointed).toBe(1);
+    expect(dry.deletedLegacy).toBe(2);
+    expect(dry.deletedOrphan).toBe(1);
+    expect(s3.keys()).toContain("files/note.md"); // untouched
+
+    const report = await dev.engine.migrateStorage();
+    expect(report.rehomed).toBe(2); // live + history re-homed
+    expect(report.missing).toEqual([]);
+
+    // Content-addressed blobs now exist; legacy + orphan gone.
+    expect(s3.keys()).toContain(`blobs/${liveHash}`);
+    expect(s3.keys()).toContain(`blobs/${oldHash}`);
+    expect(s3.keys().some((k) => k.startsWith("files/"))).toBe(false);
+    expect(s3.keys().some((k) => k.startsWith("history/"))).toBe(false);
+    expect(s3.keys()).not.toContain("blobs/orphan-xyz");
+
+    // Manifest repointed; both live and history content still retrievable.
+    const { manifest } = await dev.remote.loadManifest();
+    expect(manifest.files["note.md"]!.blobKey).toBe(`blobs/${liveHash}`);
+    expect(await dev.engine.restoreVersion("note.md", oldHash)).toBe(true);
+    expect(dev.vault.read("note.md")).toBe("older body");
+
+    // Idempotent: a second migration finds nothing to do.
+    const again = await dev.engine.migrateStorage();
+    expect(again.rehomed).toBe(0);
+    expect(again.deletedLegacy).toBe(0);
+    expect(again.deletedOrphan).toBe(0);
   });
 
   it("resumes a killed inbound sync from a checkpoint (no restart from zero)", async () => {

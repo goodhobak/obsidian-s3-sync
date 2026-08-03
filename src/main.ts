@@ -3,12 +3,13 @@ import { ObsidianHttpClient } from "./http/client";
 import { S3Client } from "./s3/client";
 import { MassDeleteAbortError, SyncEngine, type SyncSummary } from "./sync/engine";
 import { RemoteStore } from "./sync/remote-store";
-import { ObsidianIndexStore, ObsidianVaultFiles, SyncLogStore } from "./obsidian-adapters";
+import { FileLogger, ObsidianIndexStore, ObsidianVaultFiles, SyncLogStore } from "./obsidian-adapters";
 import { S3SyncSettingTab } from "./settings-tab";
 import { MassDeleteConfirmModal, VersionHistoryModal } from "./ui/modals";
 import { ResolveModal } from "./ui/resolve-modal";
 import { SyncLogModal } from "./ui/sync-log-modal";
 import { DeletedFilesModal } from "./ui/deleted-files-modal";
+import { MigrateModal } from "./ui/migrate-modal";
 import { S3SyncView, S3_SYNC_VIEW_TYPE } from "./ui/side-panel";
 import { StatusBarController } from "./ui/status-bar";
 import { isSyncablePath } from "./sync/filters";
@@ -39,6 +40,7 @@ export default class S3SyncPlugin extends Plugin {
   private statusBar: StatusBarController | null = null;
   private indexStore!: ObsidianIndexStore;
   private logStore!: SyncLogStore;
+  fileLogger!: FileLogger;
   /** Conflicts/errors from the most recent sync, for the Resolve command. */
   private lastConflicts: ConflictCopyRecord[] = [];
   private lastFailures: FailedFileRecord[] = [];
@@ -51,6 +53,15 @@ export default class S3SyncPlugin extends Plugin {
     await this.loadSettings();
     this.indexStore = new ObsidianIndexStore(this);
     this.logStore = new SyncLogStore(this);
+    this.fileLogger = new FileLogger(this);
+    if (this.settings.developerMode) {
+      this.devLog("info", "Plugin loaded", {
+        pluginVersion: this.manifest.version,
+        appVersion: (this.app as unknown as { appVersion?: string }).appVersion ?? "unknown",
+        platform: this.platformLabel(),
+        userAgent: navigator.userAgent,
+      });
+    }
 
     this.addSettingTab(new S3SyncSettingTab(this.app, this));
 
@@ -99,6 +110,12 @@ export default class S3SyncPlugin extends Plugin {
       id: "deleted-files",
       name: "Deleted files (restore or permanently delete)",
       callback: () => void this.openDeletedFiles(),
+    });
+
+    this.addCommand({
+      id: "migrate-storage",
+      name: "Migrate remote storage to deduplicated layout",
+      callback: () => void this.openMigrate(),
     });
 
     this.addCommand({
@@ -185,9 +202,24 @@ export default class S3SyncPlugin extends Plugin {
             inbound: p.inbound,
             outbound: p.outbound,
           }),
+        onLog: (level, message, data) => this.devLog(level, message, data),
       },
     );
     return { engine, remote };
+  }
+
+  /** Write a diagnostic line when developer mode is on. */
+  devLog(level: "debug" | "info" | "warn" | "error", message: string, data?: Record<string, unknown>): void {
+    if (this.settings.developerMode) this.fileLogger.log(level, message, data);
+  }
+
+  private platformLabel(): string {
+    if (Platform.isAndroidApp) return "android";
+    if (Platform.isIosApp) return "ios";
+    if (Platform.isMacOS) return "macos";
+    if (Platform.isWin) return "windows";
+    if (Platform.isLinux) return "linux";
+    return Platform.isMobile ? "mobile" : "desktop";
   }
 
   async testConnection(): Promise<void> {
@@ -286,6 +318,7 @@ export default class S3SyncPlugin extends Plugin {
       inbound: 0,
       outbound: 0,
     });
+    this.devLog("info", "Sync start", { trigger, platform: this.platformLabel(), configSync: this.settings.filters.syncObsidianConfig });
     try {
       const { engine, remote } = this.buildEngine();
       await remote.initialize();
@@ -307,11 +340,15 @@ export default class S3SyncPlugin extends Plugin {
       } else {
         const message = err instanceof Error ? err.message : String(err);
         console.error("[s3-sync] sync failed", err);
+        this.devLog("error", "Sync failed", { message, stack: err instanceof Error ? err.stack : undefined });
         this.setStatus({ ...this.status, phase: "error", message });
         if (trigger === "manual") new Notice(`S3 Sync failed: ${message}`, 8000);
       }
     } finally {
       this.syncing = false;
+      // Flush the diagnostic log so the last lines survive even if the app is
+      // killed right after (the Android case we are diagnosing).
+      if (this.settings.developerMode) void this.fileLogger.flush();
       if (this.syncQueued) {
         this.syncQueued = false;
         void this.syncNow("auto");
@@ -372,6 +409,27 @@ export default class S3SyncPlugin extends Plugin {
     new SyncLogModal(this.app, entries, {
       resolveEntry: (entry) => void this.openResolve(entry.conflictCopies, entry.failedFiles),
       clearLog: () => this.logStore.clear(),
+    }).open();
+  }
+
+  // ---- storage migration ----------------------------------------------------
+
+  async openMigrate(): Promise<void> {
+    if (!this.isConfigured()) {
+      new Notice("S3 Sync: configure endpoint, bucket and credentials first");
+      return;
+    }
+    const { engine, remote } = this.buildEngine();
+    try {
+      await remote.initialize();
+    } catch (err) {
+      new Notice(`S3 Sync: ${err instanceof Error ? err.message : String(err)}`, 8000);
+      return;
+    }
+    new MigrateModal(this.app, {
+      dryRun: () => engine.migrateStorage({ dryRun: true }),
+      run: () =>
+        engine.migrateStorage({ onProgress: (m) => this.devLog("info", "Migration", { step: m }) }),
     }).open();
   }
 

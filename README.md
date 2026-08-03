@@ -125,6 +125,19 @@ pnpm integration     # end-to-end against RustFS on localhost:9000
 Integration env vars: `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY`,
 `RUSTFS_SECRET_KEY`.
 
+## Troubleshooting
+
+- **Developer mode** — Settings → Developer → *Developer mode*. Writes a
+  detailed diagnostic log (plan, per-checkpoint progress, memory, large files,
+  errors) to `<vault>/.obsidian/plugins/s3-sync/debug-log.txt`. Reproduce the
+  problem, then use **Copy log to clipboard** to share it. The log is flushed
+  frequently so the last lines survive even a hard app kill (mobile).
+- **Migrate remote storage to deduplicated layout** — a command that rewrites
+  an older remote into the content-addressed store: it re-homes content, then
+  removes legacy `files/*` / `history/*` objects and orphaned blobs. Shows a
+  dry-run report first; safe to run more than once. Only needed for vaults
+  first synced before v0.2.0.
+
 ## Releasing (auto-update)
 
 Installed copies auto-update because each release ships `main.js`,

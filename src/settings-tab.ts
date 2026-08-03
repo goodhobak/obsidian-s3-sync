@@ -259,6 +259,62 @@ export class S3SyncSettingTab extends PluginSettingTab {
             void this.refreshStatistics();
           }),
       );
+
+    this.renderDeveloper(containerEl);
+  }
+
+  // ---- developer mode -------------------------------------------------------
+
+  private renderDeveloper(containerEl: HTMLElement): void {
+    const s = this.plugin.settings;
+    new Setting(containerEl).setName("Developer").setHeading();
+
+    new Setting(containerEl)
+      .setName("Developer mode (diagnostic log)")
+      .setDesc(
+        "Write a detailed log of each sync (plan, per-checkpoint progress, memory, large files, errors) " +
+          "to a file in the plugin folder. Turn this on, reproduce the problem, then copy the log to share it.",
+      )
+      .addToggle((t) =>
+        t.setValue(s.developerMode).onChange(async (v) => {
+          s.developerMode = v;
+          await this.plugin.saveSettings();
+          this.plugin.devLog("info", "Developer mode enabled", { by: "settings" });
+          this.display();
+        }),
+      );
+
+    if (!s.developerMode) return;
+
+    new Setting(containerEl)
+      .setName("Log file location")
+      .setDesc(this.plugin.fileLogger.displayPath())
+      .addButton((b) =>
+        b.setButtonText("Copy log to clipboard").onClick(async () => {
+          const text = await this.plugin.fileLogger.read();
+          if (!text) {
+            new Notice("S3 Sync: log is empty — run a sync first");
+            return;
+          }
+          await navigator.clipboard.writeText(text);
+          new Notice(`S3 Sync: copied ${text.length} chars — paste it to share`);
+        }),
+      )
+      .addButton((b) =>
+        b.setButtonText("Copy path").onClick(async () => {
+          await navigator.clipboard.writeText(this.plugin.fileLogger.displayPath());
+          new Notice("S3 Sync: log path copied");
+        }),
+      )
+      .addButton((b) =>
+        b
+          .setButtonText("Clear log")
+          .setWarning()
+          .onClick(async () => {
+            await this.plugin.fileLogger.clear();
+            new Notice("S3 Sync: log cleared");
+          }),
+      );
   }
 
   // ---- statistics -----------------------------------------------------------

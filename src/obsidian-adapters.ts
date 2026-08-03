@@ -2,6 +2,7 @@ import { App, Plugin, TFile, TFolder, normalizePath } from "obsidian";
 import type { LocalIndex, SyncLogEntry } from "./types";
 import type { IndexStore, LocalFileStat, VaultFiles } from "./sync/vault-files";
 import { desanitizeVaultPath, sanitizeVaultPath } from "./platform/filename";
+import { formatLogLine, type Logger, type LogLevel } from "./logger";
 
 /**
  * VaultFiles over the live Obsidian vault.
@@ -223,5 +224,74 @@ export class SyncLogStore {
   async clear(): Promise<void> {
     const adapter = this.plugin.app.vault.adapter;
     if (await adapter.exists(this.path)) await adapter.remove(this.path);
+  }
+}
+
+/**
+ * File-backed diagnostic logger for developer mode. Writes to
+ * `<pluginDir>/debug-log.txt`. Lines are buffered briefly and flushed on a
+ * short timer, on warn/error, and on demand — so the last lines survive a hard
+ * process kill (e.g. Android terminating a large sync). Appends are serialized.
+ */
+export class FileLogger implements Logger {
+  private buffer: string[] = [];
+  private flushing: Promise<void> = Promise.resolve();
+  private timer: number | null = null;
+  private readonly maxBufferChars = 8 * 1024;
+
+  constructor(private readonly plugin: Plugin) {}
+
+  get path(): string {
+    return normalizePath(`${this.plugin.manifest.dir}/debug-log.txt`);
+  }
+
+  /** Human-readable absolute location shown to the user. */
+  displayPath(): string {
+    return `<vault>/${this.path}`;
+  }
+
+  log(level: LogLevel, message: string, data?: Record<string, unknown>): void {
+    this.buffer.push(formatLogLine(level, message, data, Date.now()));
+    const urgent = level === "warn" || level === "error";
+    if (urgent || this.buffer.join("\n").length >= this.maxBufferChars) {
+      void this.flush();
+      return;
+    }
+    if (this.timer === null) {
+      this.timer = window.setTimeout(() => {
+        this.timer = null;
+        void this.flush();
+      }, 1000);
+    }
+  }
+
+  /** Write buffered lines to disk. Serialized so appends never interleave. */
+  flush(): Promise<void> {
+    if (this.buffer.length === 0) return this.flushing;
+    const chunk = this.buffer.join("\n") + "\n";
+    this.buffer = [];
+    if (this.timer !== null) {
+      window.clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.flushing = this.flushing
+      .then(() => this.plugin.app.vault.adapter.append(this.path, chunk))
+      .catch(() => {
+        // Never let logging failures affect sync.
+      });
+    return this.flushing;
+  }
+
+  async clear(): Promise<void> {
+    this.buffer = [];
+    const adapter = this.plugin.app.vault.adapter;
+    await this.flushing.catch(() => {});
+    if (await adapter.exists(this.path)) await adapter.remove(this.path);
+  }
+
+  async read(): Promise<string> {
+    await this.flush();
+    const adapter = this.plugin.app.vault.adapter;
+    return (await adapter.exists(this.path)) ? adapter.read(this.path) : "";
   }
 }

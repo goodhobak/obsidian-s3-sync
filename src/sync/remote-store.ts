@@ -54,6 +54,8 @@ export interface S3Api {
   headObject(relativeKey: string): Promise<{ etag: string | null; size: number } | null>;
   deleteObject(relativeKey: string): Promise<void>;
   copyObject(fromRelativeKey: string, toRelativeKey: string): Promise<void>;
+  /** List object keys under a prefix, relative to the configured key prefix. */
+  listKeys(relativePrefix: string): Promise<string[]>;
 }
 
 /**
@@ -185,6 +187,11 @@ export class RemoteStore {
 
   async deleteBlob(blobKey: string): Promise<void> {
     await this.s3.deleteObject(blobKey);
+  }
+
+  /** List stored object keys under a prefix (e.g. "blobs/", "history/"). */
+  async listKeys(prefix: string): Promise<string[]> {
+    return this.s3.listKeys(prefix);
   }
 
   /**

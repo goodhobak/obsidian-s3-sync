@@ -12,6 +12,7 @@ import {
 import { conflictCopyPath, extensionOf, isSyncablePath } from "./filters";
 import { mergeThreeWay } from "./merge";
 import { ManifestConflictError, RemoteStore } from "./remote-store";
+import { sampleMemoryMb, type LogLevel } from "../logger";
 import type { HistoryVersion } from "../types";
 import type { IndexStore, LocalFileStat, VaultFiles } from "./vault-files";
 
@@ -26,6 +27,22 @@ export interface DeletedFile {
   path: string;
   deletedAt: number;
   versions: HistoryVersion[];
+}
+
+/** Result of a storage migration to the content-addressed layout. */
+export interface MigrationReport {
+  /** Distinct content hashes referenced by the manifest. */
+  referenced: number;
+  /** Blobs copied into the content-addressed store. */
+  rehomed: number;
+  /** Live manifest entries repointed to a content-addressed key. */
+  repointed: number;
+  /** Legacy files/* and history/* objects removed. */
+  deletedLegacy: number;
+  /** Orphaned blobs removed. */
+  deletedOrphan: number;
+  /** Referenced versions whose content could not be found (not migrated). */
+  missing: string[];
 }
 
 export interface SyncSummary {
@@ -58,6 +75,8 @@ export interface EngineCallbacks {
   /** Return false to abort the sync when a suspiciously large deletion is planned. */
   confirmMassDelete(localDeletes: number, remoteDeletes: number, trackedTotal: number): Promise<boolean>;
   onProgress?(progress: SyncProgress): void;
+  /** Diagnostic log sink (developer mode). Timestamps are added by the sink. */
+  onLog?(level: LogLevel, message: string, data?: Record<string, unknown>): void;
 }
 
 interface ScannedFile {
@@ -115,6 +134,10 @@ export class SyncEngine {
     });
   }
 
+  private log(level: LogLevel, message: string, data?: Record<string, unknown>): void {
+    this.callbacks.onLog?.(level, message, data);
+  }
+
   /** Full reconcile cycle; retries when another device wins the manifest race. */
   async syncOnce(): Promise<SyncSummary> {
     let lastError: unknown = null;
@@ -149,9 +172,14 @@ export class SyncEngine {
     this.progress("Scanning vault…");
     const index = (await this.indexStore.load()) ?? emptyIndex();
     const scanned = await this.scanLocal(index);
+    this.log("info", "Scanned vault", { localFiles: scanned.size, indexedFiles: Object.keys(index.files).length });
 
     this.progress("Loading remote manifest…");
     const { manifest, etag } = await this.remote.loadManifest();
+    this.log("info", "Loaded remote manifest", {
+      remoteFiles: Object.keys(manifest.files).length,
+      manifestRevision: manifest.revision,
+    });
 
     // Rollback/replay guard: a trusted local checkpoint should never see the
     // remote manifest revision go backwards. A lower revision means either a
@@ -289,6 +317,17 @@ export class SyncEngine {
     this.outbound = 0;
     this.progress(this.opsTotal > 0 ? `Syncing ${this.opsTotal} object(s)` : "Up to date");
 
+    const pullBytes = pulls.reduce((n, p) => n + p.entry.size, 0);
+    this.log("info", "Reconcile plan", {
+      pulls: pulls.length,
+      pushes: pushes.length,
+      conflicts: conflicts.length,
+      deletesLocal: localDeletes.length,
+      deletesRemote: tombstonePushes.length,
+      pullMB: Math.round(pullBytes / (1024 * 1024)),
+      memMB: sampleMemoryMb(),
+    });
+
     // ---- pulls --------------------------------------------------------------
     // The index is checkpointed every CHECKPOINT_EVERY pulls so a sync that is
     // killed mid-run (mobile backgrounding / OS kill of a large inbound sync)
@@ -297,6 +336,10 @@ export class SyncEngine {
     let sincePersist = 0;
     for (const { path, entry } of pulls) {
       this.progress(`Downloading ${path}`);
+      // Flag large files before allocating them — a likely mobile OOM culprit.
+      if (entry.size >= 25 * 1024 * 1024) {
+        this.log("warn", "Downloading large file", { path, sizeMB: Math.round(entry.size / (1024 * 1024)), memMB: sampleMemoryMb() });
+      }
       let body: ArrayBuffer | null;
       try {
         body = await this.remote.downloadBlob(entry.blobKey, entry.hash);
@@ -306,11 +349,13 @@ export class SyncEngine {
         const reason = err instanceof Error ? err.message : String(err);
         summary.errors.push(`Integrity check failed for ${path}: ${reason}`);
         summary.failedFiles.push({ path, reason, kind: "integrity" });
+        this.log("error", "Download/integrity failed", { path, reason });
         continue;
       }
       if (!body) {
         summary.errors.push(`Remote blob missing for ${path}`);
         summary.failedFiles.push({ path, reason: "Remote blob is missing", kind: "missing" });
+        this.log("error", "Remote blob missing", { path, blobKey: entry.blobKey });
         continue;
       }
       try {
@@ -321,6 +366,7 @@ export class SyncEngine {
         const reason = err instanceof Error ? err.message : String(err);
         summary.errors.push(`Could not write ${path}: ${reason}`);
         summary.failedFiles.push({ path, reason, kind: "other" });
+        this.log("error", "Write failed", { path, reason });
         this.opsDone++;
         continue;
       }
@@ -328,6 +374,7 @@ export class SyncEngine {
       if (++sincePersist >= CHECKPOINT_EVERY) {
         sincePersist = 0;
         await this.indexStore.save(index); // resumable checkpoint
+        this.log("info", "Checkpoint", { pulled: summary.pulled + 1, ofPlanned: this.opsTotal, memMB: sampleMemoryMb() });
       }
       summary.pulled++;
       this.opsDone++;
@@ -453,6 +500,16 @@ export class SyncEngine {
     index.manifestRevision = manifest.revision;
     await this.indexStore.save(index);
     this.progress("Sync complete");
+    this.log("info", "Sync complete", {
+      pushed: summary.pushed,
+      pulled: summary.pulled,
+      deletedLocal: summary.deletedLocal,
+      deletedRemote: summary.deletedRemote,
+      conflicts: summary.conflicts,
+      merged: summary.merged,
+      errors: summary.errors.length,
+      memMB: sampleMemoryMb(),
+    });
     return summary;
   }
 
@@ -670,5 +727,95 @@ export class SyncEngine {
       return purged;
     }
     throw new ManifestConflictError();
+  }
+
+  /**
+   * Migrate an older remote to the deduplicated content-addressed layout:
+   * ensure every referenced version has a content-addressed blob, repoint live
+   * manifest entries, then delete legacy `files/*` and `history/*` objects and
+   * any orphaned blobs no longer referenced. Safe and idempotent; re-homes
+   * content before deleting the source. Pass `dryRun` to only report.
+   */
+  async migrateStorage(opts: { dryRun?: boolean; onProgress?: (message: string) => void } = {}): Promise<MigrationReport> {
+    const report: MigrationReport = {
+      referenced: 0,
+      rehomed: 0,
+      repointed: 0,
+      deletedLegacy: 0,
+      deletedOrphan: 0,
+      missing: [],
+    };
+    const progress = (m: string): void => opts.onProgress?.(m);
+
+    const { manifest, etag } = await this.remote.loadManifest();
+
+    // Map every referenced content hash -> its content-addressed key.
+    const referenced = new Map<string, string>();
+    for (const entry of Object.values(manifest.files)) {
+      if (!entry.deletedAt) referenced.set(entry.hash, await this.remote.blobKeyForHash(entry.hash));
+      for (const v of entry.history ?? []) referenced.set(v.hash, await this.remote.blobKeyForHash(v.hash));
+    }
+    report.referenced = referenced.size;
+
+    const existing = new Set(await this.remote.listKeys("blobs/"));
+
+    // 1. Ensure a content-addressed blob exists for every referenced hash.
+    progress("Re-homing content to the deduplicated store…");
+    let manifestDirty = false;
+    for (const [path, entry] of Object.entries(manifest.files)) {
+      const versions: Array<{ hash: string; sourceKey: string | null }> = [];
+      if (!entry.deletedAt) versions.push({ hash: entry.hash, sourceKey: entry.blobKey });
+      for (const v of entry.history ?? []) versions.push({ hash: v.hash, sourceKey: null });
+
+      for (const { hash, sourceKey } of versions) {
+        const contentKey = referenced.get(hash)!;
+        if (!existing.has(contentKey)) {
+          const content = sourceKey
+            ? await this.remote.downloadBlob(sourceKey, hash).catch(() => null)
+            : await this.remote.downloadByHash(hash);
+          if (!content) {
+            report.missing.push(`${path} (${hash.slice(0, 8)}…)`);
+            continue;
+          }
+          if (!opts.dryRun) await this.remote.uploadBlob(hash, content);
+          existing.add(contentKey);
+          report.rehomed++;
+        }
+      }
+
+      // Repoint the live entry to its content-addressed key.
+      if (!entry.deletedAt && entry.blobKey !== referenced.get(entry.hash)) {
+        if (!opts.dryRun) entry.blobKey = referenced.get(entry.hash)!;
+        report.repointed++;
+        manifestDirty = true;
+      }
+    }
+
+    if (manifestDirty && !opts.dryRun) {
+      progress("Saving manifest…");
+      manifest.revision += 1;
+      manifest.updatedAt = this.now();
+      await this.remote.saveManifest(manifest, etag);
+    }
+
+    // 2. Delete legacy-layout objects (their content is now content-addressed).
+    progress("Removing legacy objects…");
+    for (const prefix of ["files/", "history/"]) {
+      for (const key of await this.remote.listKeys(prefix)) {
+        if (!opts.dryRun) await this.remote.deleteBlob(key).catch(() => {});
+        report.deletedLegacy++;
+      }
+    }
+
+    // 3. Delete orphaned blobs no longer referenced by any entry or backup.
+    progress("Removing orphaned blobs…");
+    const desired = new Set(referenced.values());
+    for (const key of await this.remote.listKeys("blobs/")) {
+      if (desired.has(key)) continue;
+      if (!opts.dryRun) await this.remote.deleteBlob(key).catch(() => {});
+      report.deletedOrphan++;
+    }
+
+    return report;
   }
 }

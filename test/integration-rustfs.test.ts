@@ -3,6 +3,7 @@ import { FetchHttpClient } from "../src/http/client";
 import { S3Client } from "../src/s3/client";
 import { SyncEngine } from "../src/sync/engine";
 import { ManifestConflictError, RemoteStore } from "../src/sync/remote-store";
+import { sha256Hex } from "../src/s3/sigv4";
 import { DEFAULT_SETTINGS, type S3ConnectionSettings } from "../src/types";
 import { InMemoryIndexStore, InMemoryVault } from "./fakes";
 
@@ -153,6 +154,36 @@ describe.runIf(enabled)("RustFS integration", () => {
     await a.engine.syncOnce();
     await a.engine.purgeDeleted(["x.md", "y.md", "z.md"]);
     expect((await a.s3.listObjects("blobs/")).length).toBe(0);
+  });
+
+  it("migrates a legacy layout to content-addressed on the real server", async () => {
+    const prefix = `${runId}/migrate`;
+    const dev = makeDevice(prefix);
+    await dev.remote.initialize();
+
+    const live = new TextEncoder().encode("live migrate body").buffer as ArrayBuffer;
+    const liveHash = await sha256Hex(live);
+    await dev.s3.putObject("files/note.md", live);
+    await dev.s3.putObject("blobs/legacy-orphan", new TextEncoder().encode("junk").buffer as ArrayBuffer);
+    await dev.remote.saveManifest(
+      {
+        schemaVersion: 1,
+        revision: 1,
+        updatedAt: 1,
+        files: { "note.md": { hash: liveHash, size: live.byteLength, mtime: 1, rev: 1, blobKey: "files/note.md" } },
+      },
+      null,
+    );
+
+    const report = await dev.engine.migrateStorage();
+    expect(report.rehomed).toBe(1);
+    expect(report.deletedLegacy).toBeGreaterThanOrEqual(1);
+    expect(report.deletedOrphan).toBeGreaterThanOrEqual(1);
+
+    expect((await dev.s3.listKeys("files/")).length).toBe(0);
+    expect(await dev.s3.headObject(`blobs/${liveHash}`)).not.toBeNull();
+    const { manifest } = await dev.remote.loadManifest();
+    expect(manifest.files["note.md"]!.blobKey).toBe(`blobs/${liveHash}`);
   });
 
   it("keeps restorable version history on the server", async () => {

@@ -35,6 +35,10 @@ export class InMemoryS3 implements S3Api {
     this.objects.delete(key);
   }
 
+  async listKeys(relativePrefix: string): Promise<string[]> {
+    return [...this.objects.keys()].filter((k) => k.startsWith(relativePrefix));
+  }
+
   async copyObject(from: string, to: string): Promise<void> {
     const src = this.objects.get(from);
     if (!src) throw new S3Error(`COPY ${from}: no such key`, 404, "NoSuchKey", from);
