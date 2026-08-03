@@ -72,6 +72,25 @@ pnpm integration     # end-to-end against RustFS on localhost:9000
 Integration env vars: `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY`,
 `RUSTFS_SECRET_KEY`.
 
+## Security model
+
+- **Untrusted server.** Every downloaded blob is verified: its SHA-256 must
+  match the (authenticated) manifest entry, and in encrypted mode the content
+  hash is bound into the AES-GCM AAD. A malicious or corrupt server cannot
+  swap, tamper with, or substitute file contents — a failed check skips the
+  file rather than writing bad bytes.
+- **No out-of-vault writes.** Remote-controlled manifest paths are validated
+  (`..`, absolute, empty segments, backslashes, and NUL are rejected) before
+  any file is written, so a hostile manifest cannot escape the vault.
+- **Rollback protection.** If the remote manifest revision goes backwards
+  (replay, or a bucket restored from backup), sync refuses to run rather than
+  resurrecting deleted notes. To intentionally accept an older bucket, use
+  **Reset local sync state** in settings.
+- **Secrets on disk.** The S3 secret key and the E2E passphrase are stored in
+  the plugin's `data.json` (Obsidian has no secure-storage API). They live
+  under `.obsidian` and are never uploaded, but anyone who can read that
+  folder can read them. Treat the device as part of your trust boundary.
+
 ## Caveats
 
 - Two devices must not sync the *first* version of the same vault prefix at
@@ -79,4 +98,8 @@ Integration env vars: `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY`,
   bootstrap is `If-None-Match`-guarded, so one of them fails cleanly — rerun.
 - Renames are synced as delete + add (no server-side move optimization yet).
 - The passphrase is stored in plugin data on each device; losing it makes an
-  encrypted remote vault unrecoverable.
+  encrypted remote vault unrecoverable. There is no passphrase confirmation
+  field yet, so double-check it when first creating an encrypted vault.
+- Case-only renames (`Note.md` → `note.md`) are handled so the file is not
+  lost on macOS/iOS, but two files differing only in case cannot coexist in
+  one vault on a case-insensitive filesystem.

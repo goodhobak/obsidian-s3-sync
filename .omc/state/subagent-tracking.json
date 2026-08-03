@@ -26,10 +26,19 @@
       "status": "completed",
       "completed_at": "2026-08-03T04:58:50.888Z",
       "duration_ms": 129716
+    },
+    {
+      "agent_id": "aarchitect-verify-892ae1a11adb4e78",
+      "agent_type": "architect-verify",
+      "started_at": "2026-08-03T05:14:44.907Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-08-03T05:29:21.300Z",
+      "duration_ms": 876393
     }
   ],
-  "total_spawned": 9,
-  "total_completed": 81,
+  "total_spawned": 10,
+  "total_completed": 90,
   "total_failed": 0,
-  "last_updated": "2026-08-03T05:02:08.383Z"
+  "last_updated": "2026-08-03T05:29:21.403Z"
 }
