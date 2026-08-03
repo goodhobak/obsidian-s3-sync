@@ -217,6 +217,25 @@ describe("SyncEngine", () => {
     expect(a.vault.read("h.md")).toBe("version 1");
   });
 
+  it("restores an old version in ENCRYPTED mode (content-addressed AAD survives the server-side copy)", async () => {
+    const dev = makeDevice(s3, { encryption: { enabled: true, passphrase: "pw123" } });
+    await dev.remote.initialize();
+    dev.vault.write("h.md", "encrypted version 1");
+    await dev.engine.syncOnce();
+    dev.vault.write("h.md", "encrypted version 2");
+    await dev.engine.syncOnce();
+
+    const { manifest } = await dev.remote.loadManifest();
+    const oldHash = manifest.files["h.md"]?.history?.[0]?.hash;
+    expect(oldHash).toBeTruthy();
+
+    // History blob is a server-side copy of the old live blob; decrypt must
+    // still succeed because the AAD is bound to the content hash, not the key.
+    const ok = await dev.engine.restoreVersion("h.md", oldHash!);
+    expect(ok).toBe(true);
+    expect(dev.vault.read("h.md")).toBe("encrypted version 1");
+  }, 60_000);
+
   it("syncs end-to-end encrypted vaults with opaque keys", async () => {
     const ea = makeDevice(s3, { encryption: { enabled: true, passphrase: "pw123" } });
     const eb = makeDevice(s3, { encryption: { enabled: true, passphrase: "pw123" } });
