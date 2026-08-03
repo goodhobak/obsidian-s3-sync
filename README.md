@@ -103,6 +103,23 @@ pnpm integration     # end-to-end against RustFS on localhost:9000
 Integration env vars: `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY`,
 `RUSTFS_SECRET_KEY`.
 
+## Releasing (auto-update)
+
+Installed copies auto-update because each release ships `main.js`,
+`manifest.json` and `styles.css` as assets and `versions.json` records the
+minimum app version. BRAT checks for and applies updates (enable "Auto-update
+plugins at startup" in BRAT, or use **Check for updates**).
+
+To cut a new version, just bump and push a tag — GitHub Actions
+(`.github/workflows/release.yml`) type-checks, tests, builds, and publishes the
+release automatically:
+
+```bash
+pnpm version 0.1.1 --no-git-tag-version   # syncs manifest.json + versions.json
+git commit -am "chore: release 0.1.1"
+git tag 0.1.1 && git push origin main --tags
+```
+
 ## Security model
 
 - **Untrusted server.** Every downloaded blob is verified: its SHA-256 must
