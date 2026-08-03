@@ -69,3 +69,95 @@
   font-size: var(--font-ui-smaller);
   padding: 4px 0;
 }
+
+/* Wider modal for history / resolve / log views. */
+.s3-sync-wide-modal {
+  width: min(860px, 92vw);
+}
+
+.s3-sync-version-buttons,
+.s3-sync-resolve-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Diff rendering. */
+.s3-sync-diff {
+  max-height: 320px;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+}
+
+.s3-sync-diff-line {
+  padding: 0 4px;
+  border-radius: 2px;
+}
+
+.s3-sync-diff-add {
+  background: rgba(70, 190, 110, 0.18);
+  color: var(--text-normal);
+}
+
+.s3-sync-diff-remove {
+  background: rgba(220, 90, 90, 0.18);
+  color: var(--text-normal);
+}
+
+.s3-sync-diff-empty {
+  color: var(--text-muted);
+}
+
+/* Resolve items. */
+.s3-sync-resolve-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.s3-sync-resolve-title {
+  font-weight: var(--font-semibold);
+  word-break: break-all;
+}
+
+/* Sync log. */
+.s3-sync-log-clear {
+  margin-bottom: 10px;
+}
+
+.s3-sync-log-entry {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.s3-sync-log-entry.s3-sync-log-problem {
+  border-color: var(--text-warning);
+}
+
+.s3-sync-log-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.s3-sync-log-time {
+  font-weight: var(--font-semibold);
+}
+
+.s3-sync-log-counts {
+  font-variant-numeric: tabular-nums;
+  margin: 4px 0;
+}
+
+.s3-sync-notice-link {
+  cursor: pointer;
+  text-decoration: underline;
+}

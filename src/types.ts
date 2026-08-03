@@ -125,6 +125,38 @@ export interface SyncStatus {
   plannedOps: number;
 }
 
+/** A conflict where both versions were kept: remote took the path, ours is a copy. */
+export interface ConflictCopyRecord {
+  /** Canonical vault path that received the remote version. */
+  path: string;
+  /** The conflict copy holding this device's version. */
+  conflictCopy: string;
+  at: number;
+}
+
+/** A file that could not be synced this run and may need user action. */
+export interface FailedFileRecord {
+  path: string;
+  reason: string;
+  /** integrity = hash mismatch/tamper; missing = blob absent; other = anything else. */
+  kind: "integrity" | "missing" | "other";
+}
+
+/** One recorded sync run, for the sync log. */
+export interface SyncLogEntry {
+  at: number;
+  trigger: string;
+  pushed: number;
+  pulled: number;
+  deletedLocal: number;
+  deletedRemote: number;
+  conflicts: number;
+  merged: number;
+  errors: string[];
+  conflictCopies: ConflictCopyRecord[];
+  failedFiles: FailedFileRecord[];
+}
+
 /** Snapshot of what is and isn't synced, for the settings statistics panel. */
 export interface SyncStats {
   /** Syncable files currently in the vault (filters applied). */

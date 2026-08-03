@@ -321,6 +321,32 @@ describe("SyncEngine", () => {
     expect(res.pulled).toBe(0);
     expect(res.errors.some((e) => e.includes("Integrity check failed"))).toBe(true);
     expect(b.vault.read("safe.md")).toBeNull(); // no corrupt bytes written
+    // Structured failure record is surfaced for the Resolve UI.
+    expect(res.failedFiles).toEqual([
+      expect.objectContaining({ path: "safe.md", kind: "integrity" }),
+    ]);
+  });
+
+  it("records a conflict copy in the summary for the Resolve UI", async () => {
+    a.vault.write("c.md", "base\n");
+    await sync(a);
+    await sync(b);
+
+    // Divergent same-line edits with history disabled => conflict copy (not merge).
+    const a2 = makeDevice(s3, { versionsToKeep: 0 });
+    a2.vault.write("c.md", "base\n");
+    await sync(a2);
+    a.vault.write("c.md", "left\n");
+    b.vault.write("c.md", "right\n");
+    await sync(a);
+    const res = await sync(b);
+
+    expect(res.conflicts).toBe(1);
+    expect(res.conflictCopies).toHaveLength(1);
+    expect(res.conflictCopies[0]!.path).toBe("c.md");
+    expect(res.conflictCopies[0]!.conflictCopy).toContain("(conflict");
+    // The recorded copy path actually exists in the vault.
+    expect(b.vault.read(res.conflictCopies[0]!.conflictCopy)).toBe("right\n");
   });
 
   it("refuses to sync when the remote manifest revision rolls back (sec-M3)", async () => {

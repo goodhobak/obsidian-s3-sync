@@ -23,7 +23,16 @@ encryption. Works on desktop and mobile.
   deletions go to the trash per your Obsidian preference, and a mass-delete
   guard asks before a sync removes a large share of the vault.
 - **Version history** — old versions are kept server-side (content-addressed,
-  pruned to N per file) and restorable from a modal.
+  pruned to N per file). Right-click any file → **S3 Sync: version history** to
+  see every stored version, **compare** a diff against the current file, and
+  **restore** one.
+- **Sync log** — every run is recorded (pushed/pulled/deleted/merged/conflicts/
+  errors, newest first). Open it with the **Show sync log** command.
+- **Resolve conflicts & errors** — when a sync keeps both versions of a file
+  (conflict copy) or a file fails to sync, the **Resolve conflicts and errors**
+  command (or the "Resolve" link in the notice / sync log) opens a window to
+  compare the two versions and choose *keep remote*, *use my version*, or *open
+  both to merge by hand*; failed files get a one-click retry.
 - **End-to-end encryption (optional)** — AES-256-GCM with keys derived from a
   passphrase (PBKDF2, 600k iterations). File contents *and* the manifest are
   encrypted; object keys are opaque ids, so the server learns neither your

@@ -1,5 +1,5 @@
 import { App, Plugin, TFile, TFolder, normalizePath } from "obsidian";
-import type { LocalIndex } from "./types";
+import type { LocalIndex, SyncLogEntry } from "./types";
 import type { IndexStore, LocalFileStat, VaultFiles } from "./sync/vault-files";
 
 /** VaultFiles implementation over the live Obsidian vault. */
@@ -89,6 +89,42 @@ export class ObsidianIndexStore implements IndexStore<LocalIndex> {
   }
 
   async reset(): Promise<void> {
+    const adapter = this.plugin.app.vault.adapter;
+    if (await adapter.exists(this.path)) await adapter.remove(this.path);
+  }
+}
+
+/** Persists a capped, newest-first log of sync runs next to the plugin. */
+export class SyncLogStore {
+  private readonly cap = 100;
+
+  constructor(private readonly plugin: Plugin) {}
+
+  private get path(): string {
+    return normalizePath(`${this.plugin.manifest.dir}/sync-log.json`);
+  }
+
+  async load(): Promise<SyncLogEntry[]> {
+    try {
+      const adapter = this.plugin.app.vault.adapter;
+      if (!(await adapter.exists(this.path))) return [];
+      const parsed = JSON.parse(await adapter.read(this.path));
+      return Array.isArray(parsed) ? (parsed as SyncLogEntry[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Prepend an entry (newest first) and truncate to the cap. Returns the new log. */
+  async append(entry: SyncLogEntry): Promise<SyncLogEntry[]> {
+    const log = await this.load();
+    log.unshift(entry);
+    if (log.length > this.cap) log.length = this.cap;
+    await this.plugin.app.vault.adapter.write(this.path, JSON.stringify(log));
+    return log;
+  }
+
+  async clear(): Promise<void> {
     const adapter = this.plugin.app.vault.adapter;
     if (await adapter.exists(this.path)) await adapter.remove(this.path);
   }

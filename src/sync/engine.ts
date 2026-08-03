@@ -1,6 +1,8 @@
 import { sha256Hex } from "../s3/sigv4";
 import {
   emptyIndex,
+  type ConflictCopyRecord,
+  type FailedFileRecord,
   type IndexEntry,
   type LocalIndex,
   type ManifestEntry,
@@ -25,6 +27,10 @@ export interface SyncSummary {
   conflicts: number;
   merged: number;
   errors: string[];
+  /** Conflicts that kept both versions (a copy was written) — candidates to resolve. */
+  conflictCopies: ConflictCopyRecord[];
+  /** Files that failed to sync this run — candidates to retry/resolve. */
+  failedFiles: FailedFileRecord[];
 }
 
 export interface SyncProgress {
@@ -121,6 +127,8 @@ export class SyncEngine {
       conflicts: 0,
       merged: 0,
       errors: [],
+      conflictCopies: [],
+      failedFiles: [],
     };
 
     this.progress("Scanning vault…");
@@ -273,11 +281,14 @@ export class SyncEngine {
       } catch (err) {
         // Integrity failure: skip this file rather than write corrupt/tampered
         // bytes. The checkpoint is not advanced for it, so a later sync retries.
-        summary.errors.push(`Integrity check failed for ${path}: ${err instanceof Error ? err.message : String(err)}`);
+        const reason = err instanceof Error ? err.message : String(err);
+        summary.errors.push(`Integrity check failed for ${path}: ${reason}`);
+        summary.failedFiles.push({ path, reason, kind: "integrity" });
         continue;
       }
       if (!body) {
         summary.errors.push(`Remote blob missing for ${path}`);
+        summary.failedFiles.push({ path, reason: "Remote blob is missing", kind: "missing" });
         continue;
       }
       await this.files.writeBinary(path, body, entry.mtime);
@@ -289,7 +300,14 @@ export class SyncEngine {
     // ---- conflicts ----------------------------------------------------------
     for (const conflict of conflicts) {
       const resolved = await this.resolveConflict(conflict.path, conflict.local, conflict.entry, index, pushes, summary);
-      if (!resolved) summary.errors.push(`Could not resolve conflict for ${conflict.path}`);
+      if (!resolved) {
+        summary.errors.push(`Could not resolve conflict for ${conflict.path}`);
+        summary.failedFiles.push({
+          path: conflict.path,
+          reason: "Conflict could not be resolved (remote content unavailable)",
+          kind: "other",
+        });
+      }
     }
 
     // ---- pushes -------------------------------------------------------------
@@ -489,6 +507,7 @@ export class SyncEngine {
         pushes.push({ path: copyPath, stat: copyStat, hash: await sha256Hex(localContent) });
         this.opsTotal++; // the conflict copy becomes an extra push
       }
+      summary.conflictCopies.push({ path, conflictCopy: copyPath, at: this.now() });
       this.progress(`Conflict: kept your version as ${copyPath}`);
     }
     await this.files.writeBinary(path, remoteContent, entry.mtime);
@@ -548,5 +567,15 @@ export class SyncEngine {
     if (!content) return false;
     await this.files.writeBinary(path, content);
     return true;
+  }
+
+  /** Fetch (decrypt + verify) a historical version's content for preview/diff. */
+  async getHistoryContent(hash: string): Promise<ArrayBuffer | null> {
+    return this.remote.downloadHistoryBlob(hash);
+  }
+
+  /** Fetch (decrypt + verify) the current remote version's content for preview/diff. */
+  async getLiveContent(blobKey: string, hash: string): Promise<ArrayBuffer | null> {
+    return this.remote.downloadBlob(blobKey, hash);
   }
 }

@@ -9,6 +9,34 @@ export interface MergeResult {
   merged?: string;
 }
 
+export interface DiffLine {
+  kind: "context" | "add" | "remove";
+  text: string;
+}
+
+/**
+ * Simple line diff of `before` -> `after` for read-only display (version
+ * preview, conflict compare). Uses the same LCS as the merge.
+ */
+export function diffLines(before: string, after: string): DiffLine[] {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const pairs = lcsPairs(a, b);
+  const out: DiffLine[] = [];
+  let ai = 0;
+  let bi = 0;
+  for (const [pa, pb] of pairs) {
+    while (ai < pa) out.push({ kind: "remove", text: a[ai++]! });
+    while (bi < pb) out.push({ kind: "add", text: b[bi++]! });
+    out.push({ kind: "context", text: a[pa]! });
+    ai = pa + 1;
+    bi = pb + 1;
+  }
+  while (ai < a.length) out.push({ kind: "remove", text: a[ai++]! });
+  while (bi < b.length) out.push({ kind: "add", text: b[bi++]! });
+  return out;
+}
+
 /** Longest-common-subsequence table walk producing matched index pairs. */
 function lcsPairs(a: string[], b: string[]): Array<[number, number]> {
   const n = a.length;

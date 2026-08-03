@@ -3,12 +3,22 @@ import { ObsidianHttpClient } from "./http/client";
 import { S3Client } from "./s3/client";
 import { MassDeleteAbortError, SyncEngine, type SyncSummary } from "./sync/engine";
 import { RemoteStore } from "./sync/remote-store";
-import { ObsidianIndexStore, ObsidianVaultFiles } from "./obsidian-adapters";
+import { ObsidianIndexStore, ObsidianVaultFiles, SyncLogStore } from "./obsidian-adapters";
 import { S3SyncSettingTab } from "./settings-tab";
 import { MassDeleteConfirmModal, VersionHistoryModal } from "./ui/modals";
+import { ResolveModal } from "./ui/resolve-modal";
+import { SyncLogModal } from "./ui/sync-log-modal";
 import { StatusBarController } from "./ui/status-bar";
 import { isSyncablePath } from "./sync/filters";
-import { DEFAULT_SETTINGS, type PluginSettings, type SyncStats, type SyncStatus } from "./types";
+import {
+  DEFAULT_SETTINGS,
+  type ConflictCopyRecord,
+  type FailedFileRecord,
+  type PluginSettings,
+  type SyncLogEntry,
+  type SyncStats,
+  type SyncStatus,
+} from "./types";
 
 const IDLE_STATUS: SyncStatus = {
   phase: "idle",
@@ -24,6 +34,10 @@ export default class S3SyncPlugin extends Plugin {
   private status: SyncStatus = { ...IDLE_STATUS };
   private statusBar: StatusBarController | null = null;
   private indexStore!: ObsidianIndexStore;
+  private logStore!: SyncLogStore;
+  /** Conflicts/errors from the most recent sync, for the Resolve command. */
+  private lastConflicts: ConflictCopyRecord[] = [];
+  private lastFailures: FailedFileRecord[] = [];
   private syncing = false;
   private syncQueued = false;
   private pushDebounceTimer: number | null = null;
@@ -32,6 +46,7 @@ export default class S3SyncPlugin extends Plugin {
   override async onload(): Promise<void> {
     await this.loadSettings();
     this.indexStore = new ObsidianIndexStore(this);
+    this.logStore = new SyncLogStore(this);
 
     this.addSettingTab(new S3SyncSettingTab(this.app, this));
 
@@ -56,10 +71,35 @@ export default class S3SyncPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "show-sync-log",
+      name: "Show sync log",
+      callback: () => void this.openSyncLog(),
+    });
+
+    this.addCommand({
+      id: "resolve-issues",
+      name: "Resolve conflicts and errors",
+      callback: () => void this.openResolve(this.lastConflicts, this.lastFailures),
+    });
+
+    this.addCommand({
       id: "reset-sync-state",
       name: "Reset local sync state",
       callback: () => void this.resetSyncState(),
     });
+
+    // Right-click a file → version history.
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile)) return;
+        menu.addItem((item) =>
+          item
+            .setTitle("S3 Sync: version history")
+            .setIcon("history")
+            .onClick(() => void this.openVersionHistory(file)),
+        );
+      }),
+    );
 
     // Vault change listeners drive the debounced auto-push.
     this.registerEvent(this.app.vault.on("create", () => this.noteLocalChange()));
@@ -226,6 +266,7 @@ export default class S3SyncPlugin extends Plugin {
         message: this.describe(summary),
         lastSyncAt: Date.now(),
       });
+      await this.recordSync(trigger, summary);
       if (trigger === "manual") new Notice(`S3 Sync: ${this.describe(summary)}`);
       if (summary.errors.length > 0) {
         console.warn("[s3-sync] completed with errors", summary.errors);
@@ -260,6 +301,94 @@ export default class S3SyncPlugin extends Plugin {
     return parts.length ? parts.join(" ") : "up to date";
   }
 
+  // ---- sync log -------------------------------------------------------------
+
+  /** Append the run to the log and remember its unresolved conflicts/errors. */
+  private async recordSync(trigger: string, summary: SyncSummary): Promise<void> {
+    this.lastConflicts = summary.conflictCopies;
+    this.lastFailures = summary.failedFiles;
+    const entry: SyncLogEntry = {
+      at: Date.now(),
+      trigger,
+      pushed: summary.pushed,
+      pulled: summary.pulled,
+      deletedLocal: summary.deletedLocal,
+      deletedRemote: summary.deletedRemote,
+      conflicts: summary.conflicts,
+      merged: summary.merged,
+      errors: summary.errors,
+      conflictCopies: summary.conflictCopies,
+      failedFiles: summary.failedFiles,
+    };
+    try {
+      await this.logStore.append(entry);
+    } catch (err) {
+      console.warn("[s3-sync] could not write sync log", err);
+    }
+
+    const problems = summary.conflictCopies.length + summary.failedFiles.length;
+    if (problems > 0) {
+      const notice = new Notice("", 10000);
+      notice.noticeEl.setText(`S3 Sync: ${problems} item(s) need attention. `);
+      const link = notice.noticeEl.createEl("a", { text: "Resolve", cls: "s3-sync-notice-link" });
+      link.addEventListener("click", () => {
+        notice.hide();
+        void this.openResolve(summary.conflictCopies, summary.failedFiles);
+      });
+    }
+  }
+
+  async openSyncLog(): Promise<void> {
+    const entries = await this.logStore.load();
+    new SyncLogModal(this.app, entries, {
+      resolveEntry: (entry) => void this.openResolve(entry.conflictCopies, entry.failedFiles),
+      clearLog: () => this.logStore.clear(),
+    }).open();
+  }
+
+  // ---- resolve conflicts & errors -------------------------------------------
+
+  async openResolve(conflicts: ConflictCopyRecord[], failures: FailedFileRecord[]): Promise<void> {
+    if (conflicts.length === 0 && failures.length === 0) {
+      new Notice("S3 Sync: nothing to resolve");
+      return;
+    }
+    const files = new ObsidianVaultFiles(this.app);
+    const decoder = new TextDecoder();
+    new ResolveModal(this.app, conflicts, failures, {
+      readTextFile: async (path) => {
+        try {
+          return decoder.decode(await files.readBinary(path));
+        } catch {
+          return null;
+        }
+      },
+      keepCurrent: async (copyPath) => {
+        await files.delete(copyPath);
+        this.forgetConflict(copyPath);
+        void this.syncNow("auto");
+      },
+      useCopy: async (canonicalPath, copyPath) => {
+        const content = await files.readBinary(copyPath);
+        await files.writeBinary(canonicalPath, content);
+        await files.delete(copyPath);
+        this.forgetConflict(copyPath);
+        void this.syncNow("auto");
+      },
+      openBoth: (canonicalPath, copyPath) => {
+        void this.app.workspace.openLinkText(canonicalPath, "", false);
+        void this.app.workspace.openLinkText(copyPath, "", true);
+      },
+      retrySync: async () => {
+        await this.syncNow("manual");
+      },
+    }).open();
+  }
+
+  private forgetConflict(copyPath: string): void {
+    this.lastConflicts = this.lastConflicts.filter((c) => c.conflictCopy !== copyPath);
+  }
+
   // ---- version history ------------------------------------------------------
 
   private async openVersionHistory(file: TFile): Promise<void> {
@@ -267,7 +396,8 @@ export default class S3SyncPlugin extends Plugin {
       const { engine, remote } = this.buildEngine();
       await remote.initialize();
       const { manifest } = await remote.loadManifest();
-      new VersionHistoryModal(this.app, file.path, manifest.files[file.path] ?? null, {
+      const entry = manifest.files[file.path] ?? null;
+      new VersionHistoryModal(this.app, file.path, entry, {
         restore: async (path, hash) => {
           if (this.syncing) {
             new Notice("S3 Sync: a sync is in progress — try restoring again in a moment");
@@ -276,6 +406,14 @@ export default class S3SyncPlugin extends Plugin {
           const ok = await engine.restoreVersion(path, hash);
           if (ok) void this.syncNow("auto");
           return ok;
+        },
+        getVersionContent: (hash) =>
+          entry && hash === entry.hash && !entry.deletedAt
+            ? engine.getLiveContent(entry.blobKey, entry.hash)
+            : engine.getHistoryContent(hash),
+        getCurrentContent: async (path) => {
+          const af = this.app.vault.getAbstractFileByPath(path);
+          return af instanceof TFile ? this.app.vault.read(af) : null;
         },
       }).open();
     } catch (err) {
