@@ -16,8 +16,11 @@ export function extensionOf(path: string): string {
  */
 export function isSyncablePath(path: string, filters: SyncFilterSettings): boolean {
   if (path.length === 0) return false;
+  // Defense against malicious/corrupt remote manifests: reject anything that
+  // is not a clean relative vault path (traversal, absolute, backslash, NUL).
+  if (path.includes("\\") || path.includes("\0")) return false;
   const segments = path.split("/");
-  if (segments.some((s) => s.startsWith("."))) return false;
+  if (segments.some((s) => s.length === 0 || s.startsWith("."))) return false;
   for (const folder of filters.excludedFolders) {
     const normalized = folder.replace(/^\/+|\/+$/g, "");
     if (normalized && (path === normalized || path.startsWith(normalized + "/"))) return false;
