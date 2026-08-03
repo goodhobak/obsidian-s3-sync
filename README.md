@@ -4,6 +4,10 @@ Sync your Obsidian vault with any S3-compatible storage — **RustFS**, MinIO,
 AWS S3, Cloudflare R2 — with no sync server in between. Optional end-to-end
 encryption. Works on desktop and mobile.
 
+> 📘 **처음이신가요?** 한국어 설치 가이드(Cloudflare R2 무료 배포, RustFS 어드민
+> 자격증명 생성/변경, BRAT 설치, 설정)를 참고하세요:
+> [docs/SETUP-GUIDE.ko.md](docs/SETUP-GUIDE.ko.md)
+
 ## Features
 
 - **Direct S3 sync** — the plugin talks straight to your bucket with AWS
