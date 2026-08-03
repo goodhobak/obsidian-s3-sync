@@ -58,6 +58,11 @@ encryption. Works on desktop and mobile.
   config sync.
 - **Inbound / outbound indicators** — the status bar and side panel show live
   `↓ downloaded` / `↑ uploaded` counts during a sync.
+- **Mobile-safe large-file handling** — downloads run smallest-file-first so a
+  big sync makes steady, checkpointed progress, and files above the max-file-size
+  limit are skipped on download (not just upload) — so a single huge video can't
+  OOM-crash a phone mid-sync. Set a max file size on mobile; large files still
+  sync on desktop.
 - **Cross-platform & resumable** — files whose names contain characters that
   are illegal on Windows (`< > : " \ | ? *`) are transparently mapped to safe
   equivalents on Windows and back, so a vault authored on macOS/Linux syncs

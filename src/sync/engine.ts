@@ -317,6 +317,12 @@ export class SyncEngine {
     this.outbound = 0;
     this.progress(this.opsTotal > 0 ? `Syncing ${this.opsTotal} object(s)` : "Up to date");
 
+    // Download smallest files first so a large inbound sync makes progress and
+    // checkpoints many small files before attempting big ones — a single huge
+    // file (e.g. a 66 MB video) can OOM-kill a phone mid-download, and this
+    // ensures everything else is already synced when that happens.
+    pulls.sort((a, b) => a.entry.size - b.entry.size);
+
     const pullBytes = pulls.reduce((n, p) => n + p.entry.size, 0);
     this.log("info", "Reconcile plan", {
       pulls: pulls.length,
@@ -325,6 +331,7 @@ export class SyncEngine {
       deletesLocal: localDeletes.length,
       deletesRemote: tombstonePushes.length,
       pullMB: Math.round(pullBytes / (1024 * 1024)),
+      maxFileMB: this.filters.maxFileSize ? Math.round(this.filters.maxFileSize / (1024 * 1024)) : 0,
       memMB: sampleMemoryMb(),
     });
 
@@ -335,6 +342,16 @@ export class SyncEngine {
     // keep the OLD manifestRevision — it is only advanced once the sync completes.
     let sincePersist = 0;
     for (const { path, entry } of pulls) {
+      // Skip downloading remote files over the size limit. Loading a very large
+      // file into memory (plus decryption) can OOM-kill a phone; the limit lets
+      // mobile users cap this while still syncing everything smaller.
+      if (this.filters.maxFileSize > 0 && entry.size > this.filters.maxFileSize) {
+        const mb = Math.round(entry.size / (1024 * 1024));
+        summary.failedFiles.push({ path, reason: `Skipped: ${mb} MB exceeds the max file size for this device`, kind: "other" });
+        this.log("warn", "Skipped large file over limit", { path, sizeMB: mb });
+        this.opsDone++;
+        continue;
+      }
       this.progress(`Downloading ${path}`);
       // Flag large files before allocating them — a likely mobile OOM culprit.
       if (entry.size >= 25 * 1024 * 1024) {
@@ -369,6 +386,9 @@ export class SyncEngine {
         this.log("error", "Write failed", { path, reason });
         this.opsDone++;
         continue;
+      }
+      if (entry.size >= 25 * 1024 * 1024) {
+        this.log("info", "Large file written", { path, sizeMB: Math.round(entry.size / (1024 * 1024)), memMB: sampleMemoryMb() });
       }
       index.files[path] = { hash: entry.hash, size: entry.size, mtime: entry.mtime, rev: entry.rev, blobKey: entry.blobKey };
       if (++sincePersist >= CHECKPOINT_EVERY) {

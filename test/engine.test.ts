@@ -583,6 +583,49 @@ describe("SyncEngine", () => {
     expect(saves).toBeGreaterThanOrEqual(3);
   });
 
+  it("skips pulling remote files over the max file size (mobile OOM guard)", async () => {
+    a.vault.write("small.md", "tiny");
+    a.vault.write("big.md", "x".repeat(500));
+    await sync(a);
+
+    // Device b caps files at 100 bytes.
+    const engine = new SyncEngine(
+      b.vault,
+      b.remote,
+      new InMemoryIndexStore(),
+      { ...filters, maxFileSize: 100 },
+      { versionsToKeep: 5, massDeleteThreshold: 0.5 },
+      { confirmMassDelete: async () => true },
+    );
+    await b.remote.initialize();
+    const res = await engine.syncOnce();
+
+    expect(b.vault.read("small.md")).toBe("tiny"); // small file synced
+    expect(b.vault.read("big.md")).toBeNull(); // large file skipped, not downloaded
+    expect(res.failedFiles.map((f) => f.path)).toContain("big.md");
+    expect(res.failedFiles.find((f) => f.path === "big.md")!.reason).toMatch(/exceeds the max file size/);
+  });
+
+  it("downloads smallest files first (progress before large files)", async () => {
+    a.vault.write("huge.md", "x".repeat(1000));
+    a.vault.write("tiny.md", "a");
+    a.vault.write("mid.md", "x".repeat(100));
+    await sync(a);
+
+    const order: string[] = [];
+    const engine = new SyncEngine(b.vault, b.remote, new InMemoryIndexStore(), filters, { versionsToKeep: 5, massDeleteThreshold: 0.5 }, {
+      confirmMassDelete: async () => true,
+      onProgress: (p) => {
+        const m = p.message.match(/^Downloading (.+)$/);
+        if (m) order.push(m[1]!);
+      },
+    });
+    await b.remote.initialize();
+    await engine.syncOnce();
+
+    expect(order).toEqual(["tiny.md", "mid.md", "huge.md"]);
+  });
+
   it("migrates a legacy layout to content-addressed and GCs orphans", async () => {
     const dev = makeDevice(s3);
     await dev.remote.initialize();
