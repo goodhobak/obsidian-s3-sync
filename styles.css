@@ -161,3 +161,116 @@
   cursor: pointer;
   text-decoration: underline;
 }
+
+/* ---- Side panel ---- */
+.s3-sync-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 2px 10px;
+}
+
+.s3-sync-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--font-semibold);
+  font-size: var(--font-ui-medium);
+}
+
+.s3-sync-panel-title-icon {
+  display: inline-flex;
+  color: var(--interactive-accent);
+}
+
+.s3-sync-panel-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.s3-sync-panel-icon-btn:hover {
+  color: var(--text-normal);
+}
+
+.s3-sync-panel-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 10px;
+}
+
+.s3-sync-panel-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.s3-sync-panel-tab.is-active {
+  color: var(--text-normal);
+  border-bottom: 2px solid var(--interactive-accent);
+}
+
+.s3-sync-panel-tab-icon,
+.s3-sync-panel-action-icon,
+.s3-sync-panel-headline-icon {
+  display: inline-flex;
+}
+
+.s3-sync-panel-action {
+  margin-bottom: 12px;
+}
+
+.s3-sync-panel-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  justify-content: flex-start;
+  cursor: pointer;
+}
+
+.s3-sync-panel-action-desc {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin: 3px 2px 0;
+}
+
+.s3-sync-panel-headline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--font-semibold);
+  margin-bottom: 10px;
+}
+
+.s3-sync-panel-warning {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-warning);
+  font-size: var(--font-ui-smaller);
+  margin-bottom: 10px;
+}
+
+.s3-sync-panel-refresh {
+  margin: 6px 0 12px;
+  cursor: pointer;
+}
+
+.s3-sync-panel .s3-sync-log-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}

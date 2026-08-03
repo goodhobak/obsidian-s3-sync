@@ -8,6 +8,7 @@ import { S3SyncSettingTab } from "./settings-tab";
 import { MassDeleteConfirmModal, VersionHistoryModal } from "./ui/modals";
 import { ResolveModal } from "./ui/resolve-modal";
 import { SyncLogModal } from "./ui/sync-log-modal";
+import { S3SyncView, S3_SYNC_VIEW_TYPE } from "./ui/side-panel";
 import { StatusBarController } from "./ui/status-bar";
 import { isSyncablePath } from "./sync/filters";
 import {
@@ -50,8 +51,17 @@ export default class S3SyncPlugin extends Plugin {
 
     this.addSettingTab(new S3SyncSettingTab(this.app, this));
 
+    this.registerView(S3_SYNC_VIEW_TYPE, (leaf) => new S3SyncView(leaf, this));
+    this.addRibbonIcon("cloud", "Open S3 Sync panel", () => void this.activateView());
+
     const statusEl = this.addStatusBarItem();
     this.statusBar = new StatusBarController(statusEl, () => void this.syncNow("manual"));
+
+    this.addCommand({
+      id: "open-panel",
+      name: "Open S3 Sync panel",
+      callback: () => void this.activateView(),
+    });
 
     this.addCommand({
       id: "sync-now",
@@ -419,5 +429,56 @@ export default class S3SyncPlugin extends Plugin {
     } catch (err) {
       new Notice(`S3 Sync: ${err instanceof Error ? err.message : String(err)}`, 8000);
     }
+  }
+
+  // ---- side panel + convenience wrappers ------------------------------------
+
+  /** Reveal (or create) the S3 Sync panel in the right sidebar. */
+  async activateView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(S3_SYNC_VIEW_TYPE)[0] ?? null;
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false);
+      await leaf?.setViewState({ type: S3_SYNC_VIEW_TYPE, active: true });
+    }
+    if (leaf) void workspace.revealLeaf(leaf);
+  }
+
+  /** Open Obsidian settings directly on this plugin's tab. */
+  openSettings(): void {
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    setting?.open();
+    setting?.openTabById(this.manifest.id);
+  }
+
+  openVersionHistoryForActiveFile(): void {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice("S3 Sync: open a file first to see its version history");
+      return;
+    }
+    void this.openVersionHistory(file);
+  }
+
+  openResolveLatest(): void {
+    void this.openResolve(this.lastConflicts, this.lastFailures);
+  }
+
+  getRecentLog(): Promise<SyncLogEntry[]> {
+    return this.logStore.load();
+  }
+
+  async testConnectionWithNotice(): Promise<void> {
+    try {
+      await this.testConnection();
+      new Notice("S3 Sync: connection OK");
+    } catch (err) {
+      new Notice(`S3 Sync: connection failed — ${err instanceof Error ? err.message : String(err)}`, 8000);
+    }
+  }
+
+  async resetSyncStateWithNotice(): Promise<void> {
+    await this.resetSyncState();
+    new Notice("S3 Sync: local sync state was reset");
   }
 }
