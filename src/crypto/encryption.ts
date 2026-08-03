@@ -113,13 +113,22 @@ export class VaultCipher {
     return new VaultCipher(await deriveAesKey(master, "blob"), await deriveAesKey(master, "meta"));
   }
 
-  async encrypt(plaintext: Uint8Array | ArrayBuffer, purpose: "blob" | "meta"): Promise<ArrayBuffer> {
+  /**
+   * @param aad Additional authenticated data. Binds the ciphertext to its
+   * context (e.g. the blobKey) so a server cannot swap one valid blob for
+   * another: decryption of a swapped blob fails authentication.
+   */
+  async encrypt(
+    plaintext: Uint8Array | ArrayBuffer,
+    purpose: "blob" | "meta",
+    aad?: string,
+  ): Promise<ArrayBuffer> {
     const key = purpose === "blob" ? this.blobKey : this.metaKey;
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LENGTH));
     const data = plaintext instanceof Uint8Array ? toArrayBuffer(plaintext) : plaintext;
-    const ciphertext = new Uint8Array(
-      await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(nonce) }, key, data),
-    );
+    const params: AesGcmParams = { name: "AES-GCM", iv: toArrayBuffer(nonce) };
+    if (aad !== undefined) params.additionalData = toArrayBuffer(encoder.encode(aad));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt(params, key, data));
     const out = new Uint8Array(4 + 1 + NONCE_LENGTH + ciphertext.byteLength);
     out.set(MAGIC, 0);
     out[4] = FORMAT_VERSION;
@@ -128,7 +137,7 @@ export class VaultCipher {
     return toArrayBuffer(out);
   }
 
-  async decrypt(envelope: ArrayBuffer, purpose: "blob" | "meta"): Promise<ArrayBuffer> {
+  async decrypt(envelope: ArrayBuffer, purpose: "blob" | "meta", aad?: string): Promise<ArrayBuffer> {
     const bytes = new Uint8Array(envelope);
     if (bytes.byteLength < 5 + NONCE_LENGTH || MAGIC.some((b, i) => bytes[i] !== b)) {
       throw new Error("Not an S3 Sync encrypted envelope");
@@ -139,19 +148,17 @@ export class VaultCipher {
     const key = purpose === "blob" ? this.blobKey : this.metaKey;
     const nonce = bytes.slice(5, 5 + NONCE_LENGTH);
     const ciphertext = bytes.slice(5 + NONCE_LENGTH);
-    return crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: toArrayBuffer(nonce) },
-      key,
-      toArrayBuffer(ciphertext),
-    );
+    const params: AesGcmParams = { name: "AES-GCM", iv: toArrayBuffer(nonce) };
+    if (aad !== undefined) params.additionalData = toArrayBuffer(encoder.encode(aad));
+    return crypto.subtle.decrypt(params, key, toArrayBuffer(ciphertext));
   }
 
-  async encryptJson(value: unknown): Promise<ArrayBuffer> {
-    return this.encrypt(encoder.encode(JSON.stringify(value)), "meta");
+  async encryptJson(value: unknown, aad?: string): Promise<ArrayBuffer> {
+    return this.encrypt(encoder.encode(JSON.stringify(value)), "meta", aad);
   }
 
-  async decryptJson<T>(envelope: ArrayBuffer): Promise<T> {
-    return JSON.parse(decoder.decode(await this.decrypt(envelope, "meta"))) as T;
+  async decryptJson<T>(envelope: ArrayBuffer, aad?: string): Promise<T> {
+    return JSON.parse(decoder.decode(await this.decrypt(envelope, "meta", aad))) as T;
   }
 }
 

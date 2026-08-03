@@ -35,6 +35,19 @@ export class InMemoryS3 implements S3Api {
     if (!src) throw new S3Error(`COPY ${from}: no such key`, 404, "NoSuchKey", from);
     this.objects.set(to, { body: src.body.slice(0), etag: `"etag-${++this.etagCounter}"` });
   }
+
+  /** Corrupt a stored object's bytes to simulate tampering / a hostile server. */
+  corrupt(key: string): void {
+    const obj = this.objects.get(key);
+    if (!obj) throw new Error(`corrupt: no such key ${key}`);
+    const bytes = new Uint8Array(obj.body.slice(0));
+    if (bytes.length > 0) bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 0xff;
+    this.objects.set(key, { body: bytes.buffer as ArrayBuffer, etag: obj.etag });
+  }
+
+  keys(): string[] {
+    return [...this.objects.keys()];
+  }
 }
 
 /** In-memory vault filesystem. */

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { MassDeleteAbortError, SyncEngine } from "../src/sync/engine";
+import { MassDeleteAbortError, ManifestRollbackError, SyncEngine } from "../src/sync/engine";
 import { RemoteStore } from "../src/sync/remote-store";
 import { DEFAULT_SETTINGS, type SyncFilterSettings } from "../src/types";
 import { InMemoryIndexStore, InMemoryS3, InMemoryVault } from "./fakes";
@@ -19,6 +19,7 @@ function makeDevice(
     confirmMassDelete?: boolean;
     filterOverride?: SyncFilterSettings;
     versionsToKeep?: number;
+    clock?: () => number;
   } = {},
 ): Device {
   const vault = new InMemoryVault();
@@ -33,6 +34,7 @@ function makeDevice(
     opts.filterOverride ?? filters,
     { versionsToKeep: opts.versionsToKeep ?? 5, massDeleteThreshold: 0.5 },
     { confirmMassDelete: async () => opts.confirmMassDelete ?? true },
+    opts.clock,
   );
   return { vault, engine, remote };
 }
@@ -255,5 +257,125 @@ describe("SyncEngine", () => {
     const final = await sync(a);
     expect(final.pulled).toBe(1);
     expect(a.vault.read("s.md")).toBe("b-version");
+  });
+
+  // --- regression tests for review findings --------------------------------
+
+  it("skips a file whose remote blob is corrupted, without writing garbage (sec-M1)", async () => {
+    a.vault.write("safe.md", "trustworthy");
+    await sync(a);
+    const blobKey = "files/safe.md";
+    s3.corrupt(blobKey);
+
+    const res = await sync(b);
+    expect(res.pulled).toBe(0);
+    expect(res.errors.some((e) => e.includes("Integrity check failed"))).toBe(true);
+    expect(b.vault.read("safe.md")).toBeNull(); // no corrupt bytes written
+  });
+
+  it("refuses to sync when the remote manifest revision rolls back (sec-M3)", async () => {
+    a.vault.write("x.md", "v1");
+    await sync(a);
+    await sync(b); // b now records manifestRevision from a's push
+
+    // Simulate a malicious/backup rollback: replace the manifest with an older revision.
+    const older = { schemaVersion: 1 as const, revision: 0, updatedAt: 0, files: {} };
+    const cur = await b.remote.loadManifest();
+    await b.remote.saveManifest(older, cur.etag);
+
+    await expect(sync(b)).rejects.toBeInstanceOf(ManifestRollbackError);
+  });
+
+  it("cleans up uploaded blobs when a push attempt fails (quality-M1)", async () => {
+    const enc = makeDevice(s3, { encryption: { enabled: true, passphrase: "pw" } });
+    await enc.remote.initialize();
+    enc.vault.write("a.md", "aaa");
+    enc.vault.write("b.md", "bbb");
+    const before = s3.keys().filter((k) => k.startsWith("blobs/")).length;
+
+    // Make saveManifest throw a non-conflict error after blobs are uploaded.
+    const orig = enc.remote.saveManifest.bind(enc.remote);
+    let called = false;
+    enc.remote.saveManifest = async () => {
+      called = true;
+      throw new Error("simulated network failure during manifest save");
+    };
+    await expect(enc.engine.syncOnce()).rejects.toThrow("simulated network failure");
+    expect(called).toBe(true);
+    enc.remote.saveManifest = orig;
+
+    // No orphaned blobs left behind from the failed attempt.
+    const after = s3.keys().filter((k) => k.startsWith("blobs/")).length;
+    expect(after).toBe(before);
+  }, 60_000);
+
+  it("purges tombstones and their history blobs after the TTL (test-reviewer #3)", async () => {
+    let clock = 1_000;
+    const dev = makeDevice(s3, { clock: () => clock });
+    await dev.remote.initialize();
+    dev.vault.write("temp.md", "content");
+    await dev.engine.syncOnce();
+    dev.vault.remove("temp.md");
+    await dev.engine.syncOnce(); // creates tombstone + history blob
+
+    const { manifest: m1 } = await dev.remote.loadManifest();
+    expect(m1.files["temp.md"]?.deletedAt).toBeGreaterThan(0);
+
+    // Advance past the 30-day TTL and sync again.
+    clock += 31 * 24 * 60 * 60 * 1000;
+    dev.vault.write("other.md", "trigger a manifest write");
+    await dev.engine.syncOnce();
+
+    const { manifest: m2 } = await dev.remote.loadManifest();
+    expect(m2.files["temp.md"]).toBeUndefined();
+    expect(s3.keys().some((k) => k.startsWith("history/"))).toBe(false);
+  });
+
+  it("prunes history beyond versionsToKeep but keeps blobs shared across paths (test-reviewer #4)", async () => {
+    const dev = makeDevice(s3, { versionsToKeep: 2 });
+    await dev.remote.initialize();
+
+    // Two paths share identical content -> identical history hash.
+    dev.vault.write("p.md", "shared-v0");
+    dev.vault.write("q.md", "shared-v0");
+    await dev.engine.syncOnce();
+
+    // Edit q so p's "shared-v0" blob becomes q's history (shared hash across paths).
+    dev.vault.write("q.md", "q-v1");
+    await dev.engine.syncOnce();
+
+    // Push p past the cap so its own older versions prune.
+    dev.vault.write("p.md", "shared-v0"); // keep p live on the shared hash
+    dev.vault.write("p.md", "p-v1");
+    await dev.engine.syncOnce();
+    dev.vault.write("p.md", "p-v2");
+    await dev.engine.syncOnce();
+    dev.vault.write("p.md", "p-v3");
+    await dev.engine.syncOnce();
+
+    const { manifest } = await dev.remote.loadManifest();
+    expect((manifest.files["p.md"]?.history?.length ?? 0)).toBeLessThanOrEqual(2);
+    // q's history still references the shared-v0 hash, so its blob must survive.
+    const qSharedHash = manifest.files["q.md"]?.history?.[0]?.hash;
+    if (qSharedHash) expect(s3.keys()).toContain(`history/${qSharedHash}`);
+  });
+
+  it("does not delete a file that a same-cycle pull rewrote under a different case (quality-H2)", async () => {
+    // Device A creates Note.md; B syncs it.
+    a.vault.write("Note.md", "hello");
+    await sync(a);
+    await sync(b);
+
+    // A renames Note.md -> note.md (case-only). On a case-sensitive store this is
+    // a delete of Note.md + add of note.md.
+    a.vault.remove("Note.md");
+    a.vault.write("note.md", "hello");
+    await sync(a);
+
+    // B applies: it should end with note.md present (not deleted by the Note.md tombstone).
+    await sync(b);
+    const survivors = [...b.vault.files.keys()].filter((k) => k.toLowerCase() === "note.md");
+    expect(survivors.length).toBeGreaterThanOrEqual(1);
+    expect(b.vault.read(survivors[0]!)).toBe("hello");
   });
 });

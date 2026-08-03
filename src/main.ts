@@ -210,6 +210,10 @@ export default class S3SyncPlugin extends Plugin {
       const { manifest } = await remote.loadManifest();
       new VersionHistoryModal(this.app, file.path, manifest.files[file.path] ?? null, {
         restore: async (path, hash) => {
+          if (this.syncing) {
+            new Notice("S3 Sync: a sync is in progress — try restoring again in a moment");
+            return false;
+          }
           const ok = await engine.restoreVersion(path, hash);
           if (ok) void this.syncNow("auto");
           return ok;

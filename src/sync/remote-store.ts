@@ -1,5 +1,6 @@
 import { S3Error, type GetResult, type PutOptions } from "../s3/client";
 import { VaultCipher, WrongPassphraseError, randomBlobId, type VaultCryptoMeta } from "../crypto/encryption";
+import { sha256Hex } from "../s3/sigv4";
 import { emptyManifest, type RemoteManifest } from "../types";
 
 const encoder = new TextEncoder();
@@ -20,6 +21,13 @@ export class ManifestConflictError extends Error {
   constructor() {
     super("Remote manifest was updated by another device");
     this.name = "ManifestConflictError";
+  }
+}
+
+export class BlobIntegrityError extends Error {
+  constructor(blobKey: string, expected: string, actual: string) {
+    super(`Blob ${blobKey} failed integrity check (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…)`);
+    this.name = "BlobIntegrityError";
   }
 }
 
@@ -107,7 +115,7 @@ export class RemoteStore {
     const res = await this.s3.getObject(this.manifestKey);
     if (!res) return { manifest: emptyManifest(), etag: null };
     const manifest = this.cipher
-      ? await this.cipher.decryptJson<RemoteManifest>(res.body)
+      ? await this.cipher.decryptJson<RemoteManifest>(res.body, this.manifestKey)
       : (JSON.parse(decoder.decode(res.body)) as RemoteManifest);
     return { manifest, etag: res.etag };
   }
@@ -118,7 +126,7 @@ export class RemoteStore {
    */
   async saveManifest(manifest: RemoteManifest, expectedEtag: string | null): Promise<string | null> {
     const body = this.cipher
-      ? await this.cipher.encryptJson(manifest)
+      ? await this.cipher.encryptJson(manifest, this.manifestKey)
       : (encoder.encode(JSON.stringify(manifest)).buffer as ArrayBuffer);
     try {
       const res = await this.s3.putObject(this.manifestKey, body, {
@@ -143,15 +151,29 @@ export class RemoteStore {
     return `history/${hash}`;
   }
 
-  async uploadBlob(blobKey: string, plaintext: ArrayBuffer): Promise<void> {
-    const body = this.cipher ? await this.cipher.encrypt(plaintext, "blob") : plaintext;
+  /**
+   * @param hash SHA-256 (hex) of the plaintext. Bound as AES-GCM AAD so a blob
+   * cannot be replayed as different content, and used to verify integrity on
+   * download. The hash is content-identity, so it stays valid across the
+   * server-side copy that produces history blobs.
+   */
+  async uploadBlob(blobKey: string, plaintext: ArrayBuffer, hash: string): Promise<void> {
+    const body = this.cipher ? await this.cipher.encrypt(plaintext, "blob", `blob:${hash}`) : plaintext;
     await this.s3.putObject(blobKey, body);
   }
 
-  async downloadBlob(blobKey: string): Promise<ArrayBuffer | null> {
+  /**
+   * Download, decrypt, and verify a blob against its expected plaintext hash.
+   * Returns null if the object is missing. Throws BlobIntegrityError if the
+   * decrypted bytes do not hash to expectedHash (tamper / blob-swap / corruption).
+   */
+  async downloadBlob(blobKey: string, expectedHash: string): Promise<ArrayBuffer | null> {
     const res = await this.s3.getObject(blobKey);
     if (!res) return null;
-    return this.cipher ? this.cipher.decrypt(res.body, "blob") : res.body;
+    const plaintext = this.cipher ? await this.cipher.decrypt(res.body, "blob", `blob:${expectedHash}`) : res.body;
+    const actual = await sha256Hex(plaintext);
+    if (actual !== expectedHash) throw new BlobIntegrityError(blobKey, expectedHash, actual);
+    return plaintext;
   }
 
   async deleteBlob(blobKey: string): Promise<void> {
@@ -164,7 +186,7 @@ export class RemoteStore {
   }
 
   async downloadHistoryBlob(hash: string): Promise<ArrayBuffer | null> {
-    return this.downloadBlob(this.historyBlobKey(hash));
+    return this.downloadBlob(this.historyBlobKey(hash), hash);
   }
 
   async deleteHistoryBlob(hash: string): Promise<void> {

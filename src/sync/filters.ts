@@ -30,15 +30,20 @@ export function isSyncablePath(path: string, filters: SyncFilterSettings): boole
   return filters.extensions.includes(ext);
 }
 
-/** "notes/foo.md" -> "notes/foo (conflict 2026-08-03 1542).md" */
-export function conflictCopyPath(path: string, now: Date): string {
+/**
+ * "notes/foo.md" -> "notes/foo (conflict 2026-08-03 154233).md".
+ * `attempt` > 0 adds a disambiguator so two conflicts of the same file within
+ * the same second do not collide (the second would otherwise overwrite the first).
+ */
+export function conflictCopyPath(path: string, now: Date, attempt = 0): string {
   const stamp =
     `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ` +
     `${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+  const suffix = attempt > 0 ? `${stamp} #${attempt + 1}` : stamp;
   const dot = path.lastIndexOf(".");
   const slash = path.lastIndexOf("/");
   if (dot > slash) {
-    return `${path.slice(0, dot)}${CONFLICT_MARKER}${stamp})${path.slice(dot)}`;
+    return `${path.slice(0, dot)}${CONFLICT_MARKER}${suffix})${path.slice(dot)}`;
   }
-  return `${path}${CONFLICT_MARKER}${stamp})`;
+  return `${path}${CONFLICT_MARKER}${suffix})`;
 }

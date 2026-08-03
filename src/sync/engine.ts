@@ -44,6 +44,17 @@ interface PushItem {
   hash: string;
 }
 
+export class ManifestRollbackError extends Error {
+  constructor(seen: number, remote: number) {
+    super(
+      `Remote manifest revision went backwards (last applied ${seen}, remote ${remote}). ` +
+        `Refusing to sync to avoid resurrecting deleted notes. If you restored the bucket ` +
+        `from backup on purpose, reset local sync state to continue.`,
+    );
+    this.name = "ManifestRollbackError";
+  }
+}
+
 export class MassDeleteAbortError extends Error {
   constructor() {
     super("Sync aborted: mass deletion was not confirmed");
@@ -101,6 +112,43 @@ export class SyncEngine {
 
     this.progress("Loading remote manifest…");
     const { manifest, etag } = await this.remote.loadManifest();
+
+    // Rollback/replay guard: a trusted local checkpoint should never see the
+    // remote manifest revision go backwards. A lower revision means either a
+    // malicious/replayed manifest or a restored-from-backup bucket; refuse to
+    // reconcile against it rather than resurrect deleted notes or revert edits.
+    if (manifest.revision < index.manifestRevision) {
+      throw new ManifestRollbackError(index.manifestRevision, manifest.revision);
+    }
+
+    // Blobs uploaded during THIS attempt. If the attempt throws before the
+    // manifest commits, nothing references them, so we delete them to avoid
+    // orphaned-blob storage leaks (encrypted mode uses random keys).
+    const uploadedThisAttempt: string[] = [];
+    try {
+      return await this.reconcile(index, scanned, manifest, etag, summary, uploadedThisAttempt);
+    } catch (err) {
+      if (!(err instanceof ManifestConflictError)) {
+        for (const blobKey of uploadedThisAttempt) {
+          try {
+            await this.remote.deleteBlob(blobKey);
+          } catch {
+            // Best-effort; a leaked blob is better than masking the real error.
+          }
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async reconcile(
+    index: LocalIndex,
+    scanned: Map<string, ScannedFile>,
+    manifest: RemoteManifest,
+    etag: string | null,
+    summary: SyncSummary,
+    uploadedThisAttempt: string[],
+  ): Promise<SyncSummary> {
 
     // ---- classify -----------------------------------------------------------
     const paths = new Set<string>([
@@ -196,7 +244,15 @@ export class SyncEngine {
     // ---- pulls --------------------------------------------------------------
     for (const { path, entry } of pulls) {
       this.progress(`Downloading ${path}`);
-      const body = await this.remote.downloadBlob(entry.blobKey);
+      let body: ArrayBuffer | null;
+      try {
+        body = await this.remote.downloadBlob(entry.blobKey, entry.hash);
+      } catch (err) {
+        // Integrity failure: skip this file rather than write corrupt/tampered
+        // bytes. The checkpoint is not advanced for it, so a later sync retries.
+        summary.errors.push(`Integrity check failed for ${path}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
       if (!body) {
         summary.errors.push(`Remote blob missing for ${path}`);
         continue;
@@ -215,6 +271,7 @@ export class SyncEngine {
     // ---- pushes -------------------------------------------------------------
     let manifestDirty = false;
     const blobsToDeleteAfterSave: string[] = [];
+    const historyDeleteCandidates = new Set<string>();
 
     for (const push of pushes) {
       this.progress(`Uploading ${push.path}`);
@@ -225,9 +282,10 @@ export class SyncEngine {
       const blobKey = this.remote.newBlobKey(push.path);
 
       if (prev && !prev.deletedAt && prev.hash !== hash && this.options.versionsToKeep > 0) {
-        await this.captureHistory(manifest, push.path, prev, blobsToDeleteAfterSave);
+        await this.captureHistory(push.path, prev, historyDeleteCandidates);
       }
-      await this.remote.uploadBlob(blobKey, content);
+      await this.remote.uploadBlob(blobKey, content, hash);
+      uploadedThisAttempt.push(blobKey);
       if (prev && prev.blobKey !== blobKey) blobsToDeleteAfterSave.push(prev.blobKey);
 
       const entry: ManifestEntry = {
@@ -253,7 +311,7 @@ export class SyncEngine {
       }
       this.progress(`Propagating deletion of ${path}`);
       if (this.options.versionsToKeep > 0) {
-        await this.captureHistory(manifest, path, prev, blobsToDeleteAfterSave);
+        await this.captureHistory(path, prev, historyDeleteCandidates);
       }
       manifest.files[path] = { ...prev, rev: prev.rev + 1, deletedAt: this.now(), blobKey: "" };
       blobsToDeleteAfterSave.push(prev.blobKey);
@@ -263,7 +321,17 @@ export class SyncEngine {
     }
 
     // ---- apply remote deletions locally ------------------------------------
+    // On case-insensitive filesystems (macOS/iOS) a remote delete of "Note.md"
+    // and a pull of "note.md" resolve to the same on-disk file. Never delete a
+    // path a pull in this same cycle just wrote (compared case-insensitively),
+    // or the freshly-synced content would vanish.
+    const pulledLower = new Set(pulls.map((p) => p.path.toLowerCase()));
+    for (const push of pushes) pulledLower.add(push.path.toLowerCase());
     for (const path of localDeletes) {
+      if (pulledLower.has(path.toLowerCase())) {
+        delete index.files[path]; // forget the old-case entry; keep the file on disk
+        continue;
+      }
       this.progress(`Deleting ${path}`);
       if (await this.files.exists(path)) await this.files.delete(path);
       delete index.files[path];
@@ -276,15 +344,14 @@ export class SyncEngine {
     const cutoff = this.now() - TOMBSTONE_TTL_MS;
     for (const [path, entry] of Object.entries(manifest.files)) {
       if (entry.deletedAt && entry.deletedAt < cutoff) {
-        for (const version of entry.history ?? []) {
-          if (!this.hashReferencedElsewhere(manifest, path, version.hash)) {
-            blobsToDeleteAfterSave.push(this.remote.historyBlobKey(version.hash));
-          }
-        }
+        for (const version of entry.history ?? []) historyDeleteCandidates.add(version.hash);
         delete manifest.files[path];
         manifestDirty = true;
       }
     }
+
+    // Decide history-blob deletions in one pass over the finalized manifest.
+    this.resolveHistoryDeletions(manifest, historyDeleteCandidates, blobsToDeleteAfterSave);
 
     // ---- persist ------------------------------------------------------------
     if (manifestDirty) {
@@ -346,7 +413,12 @@ export class SyncEngine {
   ): Promise<boolean> {
     summary.conflicts++;
     const localContent = local ? await this.files.readBinary(path) : null;
-    const remoteContent = await this.remote.downloadBlob(entry.blobKey);
+    let remoteContent: ArrayBuffer | null;
+    try {
+      remoteContent = await this.remote.downloadBlob(entry.blobKey, entry.hash);
+    } catch {
+      return false; // integrity failure: leave both sides untouched, retry later
+    }
     if (!remoteContent) return false;
 
     const base = index.files[path] ?? null;
@@ -378,7 +450,10 @@ export class SyncEngine {
 
     // Keep both: remote content takes the canonical path, local edit becomes a copy.
     if (localContent) {
-      const copyPath = conflictCopyPath(path, new Date(this.now()));
+      let copyPath = conflictCopyPath(path, new Date(this.now()));
+      for (let attempt = 1; (await this.files.exists(copyPath)) && attempt < 100; attempt++) {
+        copyPath = conflictCopyPath(path, new Date(this.now()), attempt);
+      }
       await this.files.writeBinary(copyPath, localContent);
       const copyStat = await this.files.stat(copyPath);
       if (copyStat) pushes.push({ path: copyPath, stat: copyStat, hash: await sha256Hex(localContent) });
@@ -389,11 +464,18 @@ export class SyncEngine {
     return true;
   }
 
+  /**
+   * Snapshot the previous version into content-addressed history and prune to
+   * versionsToKeep. Pruned hashes are recorded as deletion *candidates*; whether
+   * their blobs can actually be deleted is decided in one final pass over the
+   * finalized manifest (see resolveHistoryDeletions) so shared content-addressed
+   * blobs are never removed while still referenced. This keeps the whole sync
+   * O(N) instead of O(N^2).
+   */
   private async captureHistory(
-    manifest: RemoteManifest,
     path: string,
     prev: ManifestEntry,
-    blobsToDeleteAfterSave: string[],
+    historyDeleteCandidates: Set<string>,
   ): Promise<void> {
     try {
       await this.remote.snapshotToHistory(prev.blobKey, prev.hash);
@@ -403,21 +485,28 @@ export class SyncEngine {
     const history = [{ hash: prev.hash, size: prev.size, ts: this.now() }, ...(prev.history ?? [])];
     while (history.length > this.options.versionsToKeep) {
       const dropped = history.pop();
-      if (dropped && !this.hashReferencedElsewhere(manifest, path, dropped.hash)) {
-        blobsToDeleteAfterSave.push(this.remote.historyBlobKey(dropped.hash));
-      }
+      if (dropped) historyDeleteCandidates.add(dropped.hash);
     }
     prev.history = history;
   }
 
-  /** Content-addressed history blobs may be shared; only unreferenced ones may be deleted. */
-  private hashReferencedElsewhere(manifest: RemoteManifest, exceptPath: string, hash: string): boolean {
-    for (const [path, entry] of Object.entries(manifest.files)) {
-      for (const version of entry.history ?? []) {
-        if (version.hash === hash && path !== exceptPath) return true;
-      }
+  /**
+   * Given the finalized manifest, decide which candidate history hashes are now
+   * unreferenced and queue their blobs for deletion. Single O(N) scan.
+   */
+  private resolveHistoryDeletions(
+    manifest: RemoteManifest,
+    candidates: Set<string>,
+    blobsToDeleteAfterSave: string[],
+  ): void {
+    if (candidates.size === 0) return;
+    const referenced = new Set<string>();
+    for (const entry of Object.values(manifest.files)) {
+      for (const version of entry.history ?? []) referenced.add(version.hash);
     }
-    return false;
+    for (const hash of candidates) {
+      if (!referenced.has(hash)) blobsToDeleteAfterSave.push(this.remote.historyBlobKey(hash));
+    }
   }
 
   /** Restore a historical version into the vault; the next sync pushes it as the newest revision. */
