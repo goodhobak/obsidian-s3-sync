@@ -153,9 +153,9 @@ export class S3SyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Maximum file size (MB)")
       .setDesc(
-        "Files larger than this are skipped, both when uploading and downloading. 0 = no limit. " +
-          "On phones/tablets, set a limit (e.g. 50) — downloading a very large file can crash the app; " +
-          "large files still sync on desktop.",
+        "Files larger than this are skipped, both when uploading and downloading. 0 = no limit on desktop. " +
+          "On phones/tablets, 0 applies a safe 50 MB cap (downloading a very large file can crash the app); " +
+          "set a specific value to change it. Large files still sync on desktop.",
       )
       .addText((t) =>
         t.setValue(String(s.filters.maxFileSize / (1024 * 1024) || 0)).onChange(async (v) => {

@@ -179,13 +179,26 @@ export default class S3SyncPlugin extends Plugin {
     return new S3Client(new ObsidianHttpClient(requestUrl), this.settings.connection);
   }
 
+  /** Default max file size applied on mobile when the user has set none (0), to
+   * avoid loading a very large file into memory and OOM-crashing the app. */
+  static readonly MOBILE_DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024;
+
+  /** Filters with a mobile safety cap applied when no explicit limit is set. */
+  effectiveFilters(): typeof this.settings.filters {
+    const f = { ...this.settings.filters };
+    if (Platform.isMobile && f.maxFileSize === 0) {
+      f.maxFileSize = S3SyncPlugin.MOBILE_DEFAULT_MAX_FILE_SIZE;
+    }
+    return f;
+  }
+
   private buildEngine(): { engine: SyncEngine; remote: RemoteStore } {
     const remote = new RemoteStore(this.buildS3(), this.settings);
     const engine = new SyncEngine(
       new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig, Platform.isWin),
       remote,
       this.indexStore,
-      this.settings.filters,
+      this.effectiveFilters(),
       { versionsToKeep: this.settings.versionsToKeep, massDeleteThreshold: this.settings.massDeleteThreshold },
       {
         confirmMassDelete: (localDeletes, remoteDeletes, total) =>
@@ -280,11 +293,12 @@ export default class S3SyncPlugin extends Plugin {
    * many are already tracked in the local sync index.
    */
   async getSyncStats(): Promise<SyncStats> {
+    const filters = this.effectiveFilters();
     let vaultObjects = 0;
     let vaultBytes = 0;
     for (const file of this.app.vault.getFiles()) {
-      if (!isSyncablePath(file.path, this.settings.filters)) continue;
-      if (this.settings.filters.maxFileSize > 0 && file.stat.size > this.settings.filters.maxFileSize) continue;
+      if (!isSyncablePath(file.path, filters)) continue;
+      if (filters.maxFileSize > 0 && file.stat.size > filters.maxFileSize) continue;
       vaultObjects++;
       vaultBytes += file.stat.size;
     }
