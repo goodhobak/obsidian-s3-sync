@@ -562,6 +562,48 @@ describe("SyncEngine", () => {
     for (let i = 0; i < 4; i++) expect(b.vault.read(`ok${i}.md`)).toBe(`body ${i}`);
   });
 
+  it("isolates a single failed upload — a dropped connection does not abort push", async () => {
+    const dev = makeDevice(s3);
+    await dev.remote.initialize();
+    dev.vault.write("a.md", "aaa");
+    dev.vault.write("bad.md", "bbb");
+    dev.vault.write("c.md", "ccc");
+
+    const orig = dev.remote.uploadBlob.bind(dev.remote);
+    dev.remote.uploadBlob = async (hash, content) => {
+      if (new TextDecoder().decode(content) === "bbb") throw new Error("Request Failed. IOException Stream closed");
+      return orig(hash, content);
+    };
+
+    const res = await dev.engine.syncOnce(); // must NOT throw
+    expect(res.pushed).toBe(2);
+    expect(res.failedFiles.map((f) => f.path)).toContain("bad.md");
+
+    const { manifest } = await dev.remote.loadManifest();
+    expect(manifest.files["a.md"]).toBeTruthy();
+    expect(manifest.files["c.md"]).toBeTruthy();
+    expect(manifest.files["bad.md"]).toBeUndefined(); // not committed since upload failed
+  });
+
+  it("retries a transient manifest-save failure", async () => {
+    const dev = makeDevice(s3);
+    await dev.remote.initialize();
+    dev.vault.write("x.md", "x");
+
+    const orig = dev.remote.saveManifest.bind(dev.remote);
+    let calls = 0;
+    dev.remote.saveManifest = async (m, etag) => {
+      if (++calls === 1) throw new Error("Request Failed. IOException Stream closed");
+      return orig(m, etag);
+    };
+
+    const res = await dev.engine.syncOnce(); // retries and succeeds
+    expect(res.pushed).toBe(1);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    const { manifest } = await dev.remote.loadManifest();
+    expect(manifest.files["x.md"]).toBeTruthy();
+  });
+
   it("checkpoints the index during a large inbound sync (resumable on kill)", async () => {
     for (let i = 0; i < 60; i++) a.vault.write(`f${i}.md`, `content ${i}`);
     await sync(a);

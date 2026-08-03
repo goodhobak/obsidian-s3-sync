@@ -65,12 +65,13 @@ encryption. Works on desktop and mobile.
   OOM-crash a phone mid-sync. Set a max file size on mobile; large files still
   sync on desktop.
 - **Cross-platform & resumable** — files whose names contain characters that
-  are illegal on Windows (`< > : " \ | ? *`) are transparently mapped to safe
-  equivalents on Windows and back, so a vault authored on macOS/Linux syncs
-  onto Windows. A single un-writable file never aborts the run (it's reported
-  in Resolve). Large inbound syncs checkpoint their progress, so a sync
-  interrupted on mobile (backgrounding / OS kill) resumes where it stopped
-  instead of restarting from zero.
+  are illegal on Windows and mobile (`< > : " \ | ? *`) are transparently
+  mapped to safe equivalents on those platforms and back, so a vault authored
+  on macOS/Linux syncs everywhere. A single un-writable file or failed upload
+  (e.g. a dropped mobile connection) never aborts the run — it's reported in
+  Resolve and retried next sync. Large inbound syncs checkpoint their progress,
+  so a sync interrupted on mobile resumes where it stopped instead of
+  restarting from zero, and the manifest save retries transient network errors.
 - **Right-sidebar panel** — a cloud icon in the ribbon opens a panel with
   tabbed action buttons (Sync now, Version history, Resolve, Log, Test,
   Reset, Settings), a live status tab, and a recent-runs log.

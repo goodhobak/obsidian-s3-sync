@@ -138,6 +138,23 @@ export class SyncEngine {
     this.callbacks.onLog?.(level, message, data);
   }
 
+  /** Save the manifest, retrying transient network failures; a conflict rethrows. */
+  private async saveManifestWithRetry(manifest: RemoteManifest, etag: string | null): Promise<void> {
+    const MAX = 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.remote.saveManifest(manifest, etag);
+        return;
+      } catch (err) {
+        if (err instanceof ManifestConflictError || attempt >= MAX) throw err;
+        this.log("warn", "Manifest save failed, retrying", {
+          attempt,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   /** Full reconcile cycle; retries when another device wins the manifest race. */
   async syncOnce(): Promise<SyncSummary> {
     let lastError: unknown = null;
@@ -421,36 +438,48 @@ export class SyncEngine {
 
     for (const push of pushes) {
       this.progress(`Uploading ${push.path}`);
-      const content = await this.files.readBinary(push.path);
-      // Contents may have changed since scan; hash what we actually upload.
-      const hash = await sha256Hex(content);
-      const prev = manifest.files[push.path] ?? null;
+      try {
+        const content = await this.files.readBinary(push.path);
+        // Contents may have changed since scan; hash what we actually upload.
+        const hash = await sha256Hex(content);
+        const prev = manifest.files[push.path] ?? null;
 
-      // Retain the superseded version as a backup (up to versionsToKeep), or
-      // mark its content for possible cleanup when history is disabled.
-      if (prev && !prev.deletedAt && prev.hash !== hash) {
-        if (this.options.versionsToKeep > 0) this.captureHistory(push.path, prev, historyDeleteCandidates);
-        else historyDeleteCandidates.add(prev.hash);
+        // Upload first — the network op is the failure-prone step. Only mutate
+        // the manifest/history after it succeeds so a failed upload leaves no
+        // dangling reference.
+        const { blobKey, uploaded } = await this.remote.uploadBlob(hash, content);
+        if (uploaded) uploadedThisAttempt.push(blobKey);
+
+        // Retain the superseded version as a backup (up to versionsToKeep), or
+        // mark its content for possible cleanup when history is disabled.
+        if (prev && !prev.deletedAt && prev.hash !== hash) {
+          if (this.options.versionsToKeep > 0) this.captureHistory(push.path, prev, historyDeleteCandidates);
+          else historyDeleteCandidates.add(prev.hash);
+        }
+
+        const entry: ManifestEntry = {
+          hash,
+          size: content.byteLength,
+          mtime: push.stat.mtime,
+          rev: (prev?.rev ?? 0) + 1,
+          blobKey,
+          history: prev?.history,
+        };
+        manifest.files[push.path] = entry;
+        index.files[push.path] = { hash, size: content.byteLength, mtime: push.stat.mtime, rev: entry.rev, blobKey };
+        manifestDirty = true;
+        summary.pushed++;
+        this.outbound++;
+      } catch (err) {
+        // A transient upload/read failure (e.g. a dropped mobile connection —
+        // "Stream closed") must not abort the whole push batch. Record it and
+        // keep going; the next sync retries (dedup makes re-upload cheap).
+        const reason = err instanceof Error ? err.message : String(err);
+        summary.errors.push(`Could not upload ${push.path}: ${reason}`);
+        summary.failedFiles.push({ path: push.path, reason, kind: "other" });
+        this.log("error", "Upload failed", { path: push.path, reason });
       }
-
-      // Content-addressed upload: identical content is never stored twice.
-      const { blobKey, uploaded } = await this.remote.uploadBlob(hash, content);
-      if (uploaded) uploadedThisAttempt.push(blobKey);
-
-      const entry: ManifestEntry = {
-        hash,
-        size: content.byteLength,
-        mtime: push.stat.mtime,
-        rev: (prev?.rev ?? 0) + 1,
-        blobKey,
-        history: prev?.history,
-      };
-      manifest.files[push.path] = entry;
-      index.files[push.path] = { hash, size: content.byteLength, mtime: push.stat.mtime, rev: entry.rev, blobKey };
-      manifestDirty = true;
-      summary.pushed++;
       this.opsDone++;
-      this.outbound++;
     }
 
     // ---- deletion propagation (local -> remote tombstones) ------------------
@@ -506,7 +535,10 @@ export class SyncEngine {
       manifest.revision += 1;
       manifest.updatedAt = this.now();
       this.progress("Saving manifest…");
-      await this.remote.saveManifest(manifest, etag); // throws ManifestConflictError on race
+      // The manifest save is a single large request; retry transient network
+      // failures ("Stream closed" on mobile) so a whole batch of uploads is not
+      // discarded. A ManifestConflictError still propagates to the outer retry.
+      await this.saveManifestWithRetry(manifest, etag);
       for (const blobKey of blobsToDeleteAfterSave) {
         if (!blobKey) continue;
         try {

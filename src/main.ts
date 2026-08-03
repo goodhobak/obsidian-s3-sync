@@ -195,7 +195,7 @@ export default class S3SyncPlugin extends Plugin {
   private buildEngine(): { engine: SyncEngine; remote: RemoteStore } {
     const remote = new RemoteStore(this.buildS3(), this.settings);
     const engine = new SyncEngine(
-      new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig, Platform.isWin),
+      new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig, Platform.isWin || Platform.isMobile),
       remote,
       this.indexStore,
       this.effectiveFilters(),
@@ -483,7 +483,7 @@ export default class S3SyncPlugin extends Plugin {
       new Notice("S3 Sync: nothing to resolve");
       return;
     }
-    const files = new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig, Platform.isWin);
+    const files = new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig, Platform.isWin || Platform.isMobile);
     const decoder = new TextDecoder();
     new ResolveModal(this.app, conflicts, failures, {
       readTextFile: async (path) => {

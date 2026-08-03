@@ -1,7 +1,7 @@
 {
   "name": "obsidian-s3-sync",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Sync your Obsidian vault with any S3-compatible storage (RustFS, MinIO, AWS S3, R2) — optional end-to-end encryption, no sync server required.",
   "main": "main.js",
   "packageManager": "pnpm@10.33.0",
