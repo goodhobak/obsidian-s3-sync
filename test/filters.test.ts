@@ -138,6 +138,11 @@ describe("isSyncablePath — .obsidian config folder", () => {
     expect(isSyncablePath(".obsidian/plugins/.git/config", on)).toBe(false);
   });
 
+  it("never syncs the enabled-plugins lists (auto-enable RCE vector)", () => {
+    expect(isSyncablePath(".obsidian/community-plugins.json", on)).toBe(false);
+    expect(isSyncablePath(".obsidian/community-plugins-mobile.json", on)).toBe(false);
+  });
+
   it("still blocks traversal even inside .obsidian", () => {
     expect(isSyncablePath(".obsidian/../secrets.md", on)).toBe(false);
   });

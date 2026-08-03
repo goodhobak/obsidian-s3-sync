@@ -57,6 +57,11 @@ export function isSyncableConfigPath(path: string): boolean {
     "workspace.json",
     "workspace-mobile.json",
     "workspace",
+    // The enabled-plugins lists are per-device AND an auto-enable vector: a
+    // synced list can turn on a plugin whose code was also synced. Never sync
+    // them, so config sync can't enable code on its own.
+    "community-plugins.json",
+    "community-plugins-mobile.json",
   ]);
   if (rest.length === 1 && deviceLocal.has(rest[0]!)) return false;
   if (rest[0] === "trash") return false;

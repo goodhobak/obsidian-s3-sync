@@ -181,8 +181,11 @@ export class S3SyncSettingTab extends PluginSettingTab {
       "Sync the .obsidian folder — plugins, themes, snippets and settings — so your setup follows you across devices. ",
     );
     configDesc.createEl("strong", { text: "This plugin's own folder and per-device workspace layout are always excluded" });
+    configDesc.append(", so your S3 credentials and passphrase are never uploaded. ");
+    configDesc.createEl("strong", { text: "Requires end-to-end encryption" });
     configDesc.append(
-      ", so your S3 credentials and passphrase are never uploaded. Enable on all devices for two-way config sync.",
+      ": because config can include plugin code, it only syncs when encryption is on (so the storage server can't inject code). " +
+        "Enable on all devices for two-way config sync.",
     );
     new Setting(containerEl)
       .setName("Sync .obsidian config folder")
@@ -299,9 +302,13 @@ export class S3SyncSettingTab extends PluginSettingTab {
 
     if (!s.developerMode) return;
 
+    const logDesc = document.createDocumentFragment();
+    logDesc.append(this.plugin.fileLogger.displayPath() + " — ");
+    logDesc.createEl("strong", { text: "the log includes your file/folder names" });
+    logDesc.append(" (but never credentials or the passphrase); review before sharing publicly.");
     new Setting(containerEl)
       .setName("Log file location")
-      .setDesc(this.plugin.fileLogger.displayPath())
+      .setDesc(logDesc)
       .addButton((b) =>
         b.setButtonText("Copy log to clipboard").onClick(async () => {
           const text = await this.plugin.fileLogger.read();

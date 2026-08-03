@@ -46,8 +46,11 @@ encryption. Works on desktop and mobile.
   top applies *keep all remote*, *use all my versions*, or *retry all* at once.
 - **End-to-end encryption (optional)** — AES-256-GCM with keys derived from a
   passphrase (PBKDF2, 600k iterations). File contents *and* the manifest are
-  encrypted; object keys are opaque ids, so the server learns neither your
-  note paths nor their contents.
+  encrypted; object keys are opaque per-vault ids, so the server learns neither
+  your note paths nor their contents. (It can still see the *number* of files,
+  each file's approximate *size*, and — because identical content deduplicates
+  to one object — which files within your vault share content. Names, folders,
+  and contents stay hidden.)
 - **Filtering** — markdown always syncs; images/audio/video/PDF by default;
   other extensions opt-in; a searchable folder-exclusion list (with an
   "include subfolders" option and an Apply button); max file size; hidden
@@ -169,22 +172,34 @@ git tag 0.1.1 && git push origin main --tags
 
 ## Security model
 
-- **Untrusted server.** Every downloaded blob is verified: its SHA-256 must
-  match the (authenticated) manifest entry, and in encrypted mode the content
-  hash is bound into the AES-GCM AAD. A malicious or corrupt server cannot
-  swap, tamper with, or substitute file contents — a failed check skips the
-  file rather than writing bad bytes.
-- **No out-of-vault writes.** Remote-controlled manifest paths are validated
-  (`..`, absolute, empty segments, backslashes, and NUL are rejected) before
-  any file is written, so a hostile manifest cannot escape the vault.
+- **Encrypted mode vs plaintext mode.** With end-to-end encryption on, the
+  manifest is authenticated, so the server (or anyone who can write to the
+  bucket) cannot forge file names, sizes, hashes, or contents — the guarantees
+  below are genuinely enforced. **Without encryption, the server is fully
+  trusted**: it controls all content and metadata. Only enable encryption-off
+  mode when you trust everyone with write access to the bucket.
+- **Untrusted server (encrypted).** Every downloaded blob is verified: its
+  SHA-256 must match the authenticated manifest entry, and the content hash is
+  bound into the AES-GCM AAD. A malicious or corrupt server cannot swap, tamper
+  with, or substitute file contents — a failed check skips the file.
+- **No out-of-vault writes.** Remote-controlled paths are validated (`..`,
+  absolute, empty segments, backslashes, NUL rejected) before any write — on
+  pulls, conflict copies, merges, and version/deleted-file restores — so a
+  hostile manifest cannot escape the vault.
+- **Config sync requires encryption.** Because `.obsidian` can carry plugin
+  code, `.obsidian` config sync only runs when encryption is on (so the server
+  can't inject code that runs on next launch); the enabled-plugins lists are
+  never synced.
 - **Rollback protection.** If the remote manifest revision goes backwards
   (replay, or a bucket restored from backup), sync refuses to run rather than
   resurrecting deleted notes. To intentionally accept an older bucket, use
   **Reset local sync state** in settings.
-- **Secrets on disk.** The S3 secret key and the E2E passphrase are stored in
-  the plugin's `data.json` (Obsidian has no secure-storage API). They live
-  under `.obsidian` and are never uploaded, but anyone who can read that
-  folder can read them. Treat the device as part of your trust boundary.
+- **Secrets on disk (unencrypted).** The S3 secret key and the E2E passphrase
+  are stored **unencrypted** in the plugin's `data.json` (Obsidian has no
+  secure-storage API). They live under `.obsidian` and are never uploaded, but
+  anyone who can read that folder can read them. Treat the device as part of
+  your trust boundary. The passphrase is the only thing protecting encrypted
+  content — back it up safely; losing it makes the remote vault unrecoverable.
 
 ## Caveats
 

@@ -23,6 +23,8 @@ const MASS_DELETE_MIN_COUNT = 5;
 const CHECKPOINT_EVERY = 25;
 /** Stop the push phase after this many uploads fail in a row (network is down). */
 const MAX_CONSECUTIVE_UPLOAD_FAILURES = 8;
+/** Above this size, skip the O(n·m) 3-way merge and keep both versions instead. */
+const MAX_MERGE_BYTES = 2 * 1024 * 1024;
 
 /** A deleted (tombstoned) file with its retained recoverable backups. */
 export interface DeletedFile {
@@ -259,7 +261,7 @@ export class SyncEngine {
       const remoteTombstone = entry && entry.deletedAt ? entry : null;
 
       // Filter changes must never read as deletions: forget, don't delete.
-      if (!isSyncablePath(path, this.filters)) {
+      if (!isSyncablePath(path, this.pathFilters)) {
         if (base) dropFromIndex.push(path);
         continue;
       }
@@ -585,11 +587,24 @@ export class SyncEngine {
     return { hash: entry.hash, size: entry.size, mtime: local.stat.mtime, rev: entry.rev, blobKey: entry.blobKey };
   }
 
+  /**
+   * Filters used for path decisions. `.obsidian` config sync requires an
+   * ENCRYPTED (authenticated) manifest — otherwise a plaintext/untrusted server
+   * could inject executable config (plugin code) that runs on next launch. When
+   * not encrypted, config sync is treated as off.
+   */
+  private get pathFilters(): SyncFilterSettings {
+    if (this.filters.syncObsidianConfig && !this.remote.isEncrypted) {
+      return { ...this.filters, syncObsidianConfig: false };
+    }
+    return this.filters;
+  }
+
   /** mtime+size fast path; hash only files that look changed since the last sync. */
   private async scanLocal(index: LocalIndex): Promise<Map<string, ScannedFile>> {
     const out = new Map<string, ScannedFile>();
     for (const stat of await this.files.listFiles()) {
-      if (!isSyncablePath(stat.path, this.filters)) continue;
+      if (!isSyncablePath(stat.path, this.pathFilters)) continue;
       if (this.filters.maxFileSize > 0 && stat.size > this.filters.maxFileSize) continue;
       const known = index.files[stat.path];
       if (known && known.mtime === stat.mtime && known.size === stat.size) {
@@ -616,6 +631,16 @@ export class SyncEngine {
     summary: SyncSummary,
   ): Promise<boolean> {
     summary.conflicts++;
+    // Same size cap as pulls: don't download a huge remote version into memory
+    // just to resolve a conflict (a lying server could OOM a phone here too).
+    if (this.filters.maxFileSize > 0 && entry.size > this.filters.maxFileSize) {
+      summary.failedFiles.push({
+        path,
+        reason: "Conflict skipped: remote version exceeds the max file size for this device",
+        kind: "other",
+      });
+      return false;
+    }
     const localContent = local ? await this.files.readBinary(path) : null;
     let remoteContent: ArrayBuffer | null;
     try {
@@ -626,7 +651,16 @@ export class SyncEngine {
     if (!remoteContent) return false;
 
     const base = index.files[path] ?? null;
-    if (localContent && base && extensionOf(path) === "md") {
+    // Only 3-way merge reasonably-sized markdown — the diff3 LCS table is
+    // O(n·m) in line counts, so cap it to avoid pathological memory use; larger
+    // files fall through to a conflict copy (both versions kept).
+    if (
+      localContent &&
+      base &&
+      extensionOf(path) === "md" &&
+      localContent.byteLength <= MAX_MERGE_BYTES &&
+      remoteContent.byteLength <= MAX_MERGE_BYTES
+    ) {
       const baseContent = await this.remote.downloadByHash(base.hash);
       if (baseContent) {
         const decoder = new TextDecoder();
@@ -714,6 +748,10 @@ export class SyncEngine {
 
   /** Restore a historical version into the vault; the next sync pushes it as the newest revision. */
   async restoreVersion(path: string, hash: string): Promise<boolean> {
+    // The path can come from a manifest key (attacker-controlled in plaintext
+    // mode). Validate it before writing, exactly like the pull path, so a
+    // malicious tombstone key cannot escape the vault or write into config.
+    if (!isSyncablePath(path, this.pathFilters)) return false;
     const content = await this.remote.downloadByHash(hash);
     if (!content) return false;
     await this.files.writeBinary(path, content);
@@ -736,6 +774,7 @@ export class SyncEngine {
     const out: DeletedFile[] = [];
     for (const [path, entry] of Object.entries(manifest.files)) {
       if (!entry.deletedAt) continue;
+      if (!isSyncablePath(path, this.pathFilters)) continue; // hide hostile/malformed manifest keys
       out.push({ path, deletedAt: entry.deletedAt, versions: entry.history ?? [] });
     }
     return out.sort((a, b) => b.deletedAt - a.deletedAt);

@@ -55,11 +55,12 @@ export default class S3SyncPlugin extends Plugin {
     this.logStore = new SyncLogStore(this);
     this.fileLogger = new FileLogger(this);
     if (this.settings.developerMode) {
+      // Coarse platform only — no raw userAgent (a device fingerprint the user
+      // might paste publicly when sharing the log).
       this.devLog("info", "Plugin loaded", {
         pluginVersion: this.manifest.version,
         appVersion: (this.app as unknown as { appVersion?: string }).appVersion ?? "unknown",
         platform: this.platformLabel(),
-        userAgent: navigator.userAgent,
       });
     }
 

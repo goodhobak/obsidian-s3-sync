@@ -780,4 +780,67 @@ describe("SyncEngine", () => {
     expect(res.errors).toEqual([]);
     expect(res.pulled).toBeLessThan(60); // resumed, did not re-download all 60
   });
+
+  // --- security regression tests -------------------------------------------
+
+  it("refuses to restore a version to a traversal or config path (sec-1.1)", async () => {
+    const dev = makeDevice(s3);
+    await dev.remote.initialize();
+    // Hostile tombstone/manifest keys must never reach writeBinary via restore.
+    expect(await dev.engine.restoreVersion("../evil.md", "deadbeef")).toBe(false);
+    expect(await dev.engine.restoreVersion(".obsidian/plugins/x/main.js", "deadbeef")).toBe(false);
+    expect(await dev.engine.restoreVersion("a\\b.md", "deadbeef")).toBe(false);
+    expect(dev.vault.files.size).toBe(0); // nothing written
+  });
+
+  it("syncs .obsidian config only when the vault is encrypted (sec-2.1 gate)", async () => {
+    const cfgFilters = { ...filters, syncObsidianConfig: true };
+
+    // Plaintext: the config file is NOT pushed even with config sync enabled.
+    const plain = makeDevice(new InMemoryS3(), { filterOverride: cfgFilters });
+    plain.vault.write(".obsidian/appearance.json", "{}");
+    plain.vault.write("note.md", "hi");
+    await plain.remote.initialize();
+    const r1 = await plain.engine.syncOnce();
+    expect(r1.pushed).toBe(1);
+    expect((await plain.remote.loadManifest()).manifest.files[".obsidian/appearance.json"]).toBeUndefined();
+
+    // Encrypted: the config file IS pushed (authenticated manifest).
+    const enc = makeDevice(new InMemoryS3(), {
+      filterOverride: cfgFilters,
+      encryption: { enabled: true, passphrase: "pw" },
+    });
+    enc.vault.write(".obsidian/appearance.json", "{}");
+    enc.vault.write("note.md", "hi");
+    await enc.remote.initialize();
+    const r2 = await enc.engine.syncOnce();
+    expect(r2.pushed).toBe(2);
+    expect((await enc.remote.loadManifest()).manifest.files[".obsidian/appearance.json"]).toBeTruthy();
+  }, 60_000);
+
+  it("skips a conflict whose remote version exceeds the max file size (sec-5.1)", async () => {
+    const big = "x".repeat(500);
+    a.vault.write("c.md", "base\n");
+    await sync(a);
+    await sync(b);
+
+    // Diverge both sides; device b caps files at 100 bytes and the remote is large.
+    a.vault.write("c.md", big);
+    await sync(a);
+    b.vault.write("c.md", "mine\n");
+
+    const engine = new SyncEngine(
+      b.vault,
+      b.remote,
+      new InMemoryIndexStore(),
+      { ...filters, maxFileSize: 100 },
+      { versionsToKeep: 5, massDeleteThreshold: 0.5 },
+      { confirmMassDelete: async () => true },
+    );
+    await b.remote.initialize();
+    const res = await engine.syncOnce();
+    expect(res.failedFiles.map((f) => f.path)).toContain("c.md");
+    expect(res.failedFiles.find((f) => f.path === "c.md")!.reason).toMatch(/exceeds the max file size/);
+    expect(b.vault.read("c.md")).toBe("mine\n"); // local untouched, no huge download
+  });
 });
