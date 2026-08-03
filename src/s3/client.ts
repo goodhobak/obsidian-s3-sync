@@ -42,15 +42,58 @@ export interface ListedObject {
 
 const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+export interface RetryOptions {
+  /** Total attempts including the first. 1 disables retry. */
+  maxAttempts: number;
+  /** Base backoff in ms; grows exponentially with jitter. */
+  baseDelayMs: number;
+}
+
+const DEFAULT_RETRY: RetryOptions = { maxAttempts: 4, baseDelayMs: 600 };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether a transport error is a transient network failure worth retrying —
+ * dropped connections, DNS blips, timeouts. Matches messages seen on Android's
+ * requestUrl ("IOException Stream closed", "UnknownHostException Unable to
+ * resolve host") as well as common fetch/node network errors.
+ */
+export function isTransientNetworkError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes("stream closed") ||
+    msg.includes("unable to resolve host") ||
+    msg.includes("unknownhostexception") ||
+    msg.includes("timeout") ||
+    msg.includes("timed out") ||
+    msg.includes("etimedout") ||
+    msg.includes("econnreset") ||
+    msg.includes("econnrefused") ||
+    msg.includes("enotfound") ||
+    msg.includes("network") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("socket") ||
+    msg.includes("connection")
+  );
+}
+
 /**
  * Thin S3 client over an injected HTTP transport. Only implements the
  * operations the sync engine needs.
  */
 export class S3Client {
+  private readonly retry: RetryOptions;
+
   constructor(
     private readonly http: HttpClient,
     private readonly conn: S3ConnectionSettings,
-  ) {}
+    retry: Partial<RetryOptions> = {},
+  ) {
+    this.retry = { ...DEFAULT_RETRY, ...retry };
+  }
 
   /** Host and canonical path base depending on addressing style. */
   private endpointFor(key: string | null, query: Record<string, string>): {
@@ -96,7 +139,23 @@ export class S3Client {
     });
     // Transports set Host themselves from the URL; keep it out of the wire headers.
     const { host: _host, ...wireHeaders } = headers;
-    return this.http.request({ url, method, headers: wireHeaders, body });
+    const request = { url, method, headers: wireHeaders, body };
+
+    // Retry transient network failures with exponential backoff + jitter. The
+    // SigV4 signature stays valid across the short backoff window (15 min), so
+    // the already-signed request is reused. Non-network errors rethrow at once.
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt++) {
+      try {
+        return await this.http.request(request);
+      } catch (err) {
+        lastErr = err;
+        if (attempt >= this.retry.maxAttempts || !isTransientNetworkError(err)) throw err;
+        const backoff = this.retry.baseDelayMs * 2 ** (attempt - 1);
+        await sleep(backoff + Math.floor(Math.random() * this.retry.baseDelayMs));
+      }
+    }
+    throw lastErr;
   }
 
   private throwOnError(res: HttpResponse, context: string, key?: string): void {

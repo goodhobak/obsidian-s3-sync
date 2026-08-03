@@ -21,6 +21,8 @@ const MAX_MANIFEST_RETRIES = 3;
 const MASS_DELETE_MIN_COUNT = 5;
 /** Persist the local index every this many pulls, so a killed sync can resume. */
 const CHECKPOINT_EVERY = 25;
+/** Stop the push phase after this many uploads fail in a row (network is down). */
+const MAX_CONSECUTIVE_UPLOAD_FAILURES = 8;
 
 /** A deleted (tombstoned) file with its retained recoverable backups. */
 export interface DeletedFile {
@@ -436,7 +438,17 @@ export class SyncEngine {
     const blobsToDeleteAfterSave: string[] = [];
     const historyDeleteCandidates = new Set<string>();
 
+    // Circuit breaker: if many uploads fail in a row (each already retried at
+    // the transport level), the network is down — stop the push phase, commit
+    // what succeeded, and let the next sync resume the rest instead of grinding
+    // through hundreds of futile retries.
+    let consecutiveUploadFailures = 0;
     for (const push of pushes) {
+      if (consecutiveUploadFailures >= MAX_CONSECUTIVE_UPLOAD_FAILURES) {
+        this.log("warn", "Stopping push early — network appears down", { remaining: pushes.length - summary.pushed });
+        summary.errors.push("Network appears unavailable — remaining uploads will retry on the next sync");
+        break;
+      }
       this.progress(`Uploading ${push.path}`);
       try {
         const content = await this.files.readBinary(push.path);
@@ -470,7 +482,9 @@ export class SyncEngine {
         manifestDirty = true;
         summary.pushed++;
         this.outbound++;
+        consecutiveUploadFailures = 0;
       } catch (err) {
+        consecutiveUploadFailures++;
         // A transient upload/read failure (e.g. a dropped mobile connection —
         // "Stream closed") must not abort the whole push batch. Record it and
         // keep going; the next sync retries (dedup makes re-upload cheap).

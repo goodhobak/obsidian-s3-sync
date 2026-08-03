@@ -585,6 +585,23 @@ describe("SyncEngine", () => {
     expect(manifest.files["bad.md"]).toBeUndefined(); // not committed since upload failed
   });
 
+  it("stops the push phase after many consecutive upload failures (circuit breaker)", async () => {
+    const dev = makeDevice(s3);
+    await dev.remote.initialize();
+    for (let i = 0; i < 50; i++) dev.vault.write(`f${i}.md`, `body ${i}`);
+
+    let attempts = 0;
+    dev.remote.uploadBlob = async () => {
+      attempts++;
+      throw new Error('Request Failed. UnknownHostException Unable to resolve host "example"');
+    };
+
+    const res = await dev.engine.syncOnce(); // must NOT throw
+    expect(res.pushed).toBe(0);
+    expect(attempts).toBeLessThanOrEqual(8); // stopped early, not all 50
+    expect(res.errors.some((e) => e.includes("Network appears unavailable"))).toBe(true);
+  });
+
   it("retries a transient manifest-save failure", async () => {
     const dev = makeDevice(s3);
     await dev.remote.initialize();

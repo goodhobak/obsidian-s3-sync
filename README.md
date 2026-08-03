@@ -71,7 +71,12 @@ encryption. Works on desktop and mobile.
   (e.g. a dropped mobile connection) never aborts the run — it's reported in
   Resolve and retried next sync. Large inbound syncs checkpoint their progress,
   so a sync interrupted on mobile resumes where it stopped instead of
-  restarting from zero, and the manifest save retries transient network errors.
+  restarting from zero.
+- **Flaky-network resilient** — every request retries transient failures
+  (dropped connections, DNS blips, timeouts) with exponential backoff, so a
+  mobile sync survives an unstable connection. If the network is genuinely
+  down, the push phase stops early after repeated failures and resumes on the
+  next sync rather than grinding through hundreds of futile retries.
 - **Right-sidebar panel** — a cloud icon in the ribbon opens a panel with
   tabbed action buttons (Sync now, Version history, Resolve, Log, Test,
   Reset, Settings), a live status tab, and a recent-runs log.
