@@ -52,7 +52,7 @@ export interface PluginSettings {
 export const DEFAULT_SETTINGS: PluginSettings = {
   connection: {
     endpoint: "http://localhost:9000",
-    region: "us-east-1",
+    region: "auto",
     bucket: "",
     accessKeyId: "",
     secretAccessKey: "",

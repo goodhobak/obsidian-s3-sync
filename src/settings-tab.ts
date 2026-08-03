@@ -44,12 +44,21 @@ export class S3SyncSettingTab extends PluginSettingTab {
         }),
       );
 
-    new Setting(containerEl).setName("Region").addText((t) =>
-      t.setValue(s.connection.region).onChange(async (v) => {
-        s.connection.region = v.trim() || "us-east-1";
-        await this.plugin.saveSettings();
-      }),
-    );
+    new Setting(containerEl)
+      .setName("Region")
+      .setDesc(
+        "Signing region. Cloudflare R2: use auto. AWS S3: your bucket's region (e.g. ap-northeast-2). " +
+          "RustFS / MinIO ignore it, so auto works. Leave blank for auto.",
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("auto")
+          .setValue(s.connection.region)
+          .onChange(async (v) => {
+            s.connection.region = v.trim() || "auto";
+            await this.plugin.saveSettings();
+          }),
+      );
 
     new Setting(containerEl).setName("Bucket").addText((t) =>
       t.setValue(s.connection.bucket).onChange(async (v) => {
