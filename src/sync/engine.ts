@@ -27,10 +27,18 @@ export interface SyncSummary {
   errors: string[];
 }
 
+export interface SyncProgress {
+  message: string;
+  /** File operations completed so far in this sync. */
+  completed: number;
+  /** File operations planned for this sync (0 until the plan is known). */
+  total: number;
+}
+
 export interface EngineCallbacks {
   /** Return false to abort the sync when a suspiciously large deletion is planned. */
   confirmMassDelete(localDeletes: number, remoteDeletes: number, trackedTotal: number): Promise<boolean>;
-  onProgress?(message: string): void;
+  onProgress?(progress: SyncProgress): void;
 }
 
 interface ScannedFile {
@@ -73,8 +81,17 @@ export class SyncEngine {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
+  private opsDone = 0;
+  private opsTotal = 0;
+
   private progress(message: string): void {
-    this.callbacks.onProgress?.(message);
+    this.callbacks.onProgress?.({ message, completed: this.opsDone, total: this.opsTotal });
+  }
+
+  /** Mark one planned file operation complete and report progress. */
+  private step(message: string): void {
+    this.opsDone++;
+    this.progress(message);
   }
 
   /** Full reconcile cycle; retries when another device wins the manifest race. */
@@ -241,6 +258,12 @@ export class SyncEngine {
       if (!ok) throw new MassDeleteAbortError();
     }
 
+    // Total planned file operations, for progress reporting. Conflicts that
+    // generate an extra push bump opsTotal in resolveConflict.
+    this.opsTotal = pulls.length + conflicts.length + pushes.length + tombstonePushes.length + localDeletes.length;
+    this.opsDone = 0;
+    this.progress(this.opsTotal > 0 ? `Syncing ${this.opsTotal} object(s)` : "Up to date");
+
     // ---- pulls --------------------------------------------------------------
     for (const { path, entry } of pulls) {
       this.progress(`Downloading ${path}`);
@@ -260,6 +283,7 @@ export class SyncEngine {
       await this.files.writeBinary(path, body, entry.mtime);
       index.files[path] = { hash: entry.hash, size: entry.size, mtime: entry.mtime, rev: entry.rev, blobKey: entry.blobKey };
       summary.pulled++;
+      this.opsDone++;
     }
 
     // ---- conflicts ----------------------------------------------------------
@@ -300,6 +324,7 @@ export class SyncEngine {
       index.files[push.path] = { hash, size: content.byteLength, mtime: push.stat.mtime, rev: entry.rev, blobKey };
       manifestDirty = true;
       summary.pushed++;
+      this.opsDone++;
     }
 
     // ---- deletion propagation (local -> remote tombstones) ------------------
@@ -318,6 +343,7 @@ export class SyncEngine {
       delete index.files[path];
       manifestDirty = true;
       summary.deletedRemote++;
+      this.opsDone++;
     }
 
     // ---- apply remote deletions locally ------------------------------------
@@ -336,6 +362,7 @@ export class SyncEngine {
       if (await this.files.exists(path)) await this.files.delete(path);
       delete index.files[path];
       summary.deletedLocal++;
+      this.opsDone++;
     }
 
     for (const path of dropFromIndex) delete index.files[path];
@@ -438,9 +465,11 @@ export class SyncEngine {
           const stat = await this.files.stat(path);
           if (stat) {
             pushes.push({ path, stat, hash: await sha256Hex(mergedBuf) });
+            this.opsTotal++; // the merged result becomes an extra push
             // Accept the remote entry as the new base so the push computes rev on top of it.
             index.files[path] = { hash: entry.hash, size: entry.size, mtime: 0, rev: entry.rev, blobKey: entry.blobKey };
             summary.merged++;
+            this.opsDone++;
             this.progress(`Merged ${path}`);
             return true;
           }
@@ -456,11 +485,15 @@ export class SyncEngine {
       }
       await this.files.writeBinary(copyPath, localContent);
       const copyStat = await this.files.stat(copyPath);
-      if (copyStat) pushes.push({ path: copyPath, stat: copyStat, hash: await sha256Hex(localContent) });
+      if (copyStat) {
+        pushes.push({ path: copyPath, stat: copyStat, hash: await sha256Hex(localContent) });
+        this.opsTotal++; // the conflict copy becomes an extra push
+      }
       this.progress(`Conflict: kept your version as ${copyPath}`);
     }
     await this.files.writeBinary(path, remoteContent, entry.mtime);
     index.files[path] = { hash: entry.hash, size: entry.size, mtime: entry.mtime, rev: entry.rev, blobKey: entry.blobKey };
+    this.opsDone++;
     return true;
   }
 

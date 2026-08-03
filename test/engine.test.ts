@@ -278,6 +278,37 @@ describe("SyncEngine", () => {
     expect(a.vault.read("s.md")).toBe("b-version");
   });
 
+  it("reports progress with completed/total reaching parity at the end", async () => {
+    const s3b = new InMemoryS3();
+    const dev = makeDevice(s3b);
+    const seen: Array<{ completed: number; total: number }> = [];
+    const engine = new SyncEngine(
+      dev.vault,
+      dev.remote,
+      new InMemoryIndexStore(),
+      filters,
+      { versionsToKeep: 5, massDeleteThreshold: 0.5 },
+      {
+        confirmMassDelete: async () => true,
+        onProgress: (p) => seen.push({ completed: p.completed, total: p.total }),
+      },
+    );
+    dev.vault.write("a.md", "1");
+    dev.vault.write("b.md", "2");
+    dev.vault.write("c/d.md", "3");
+    await dev.remote.initialize();
+    await engine.syncOnce();
+
+    const withPlan = seen.filter((p) => p.total > 0);
+    expect(withPlan.length).toBeGreaterThan(0);
+    // Never report more completed than planned.
+    for (const p of withPlan) expect(p.completed).toBeLessThanOrEqual(p.total);
+    // By the end, all planned operations are counted complete.
+    const last = withPlan[withPlan.length - 1]!;
+    expect(last.completed).toBe(last.total);
+    expect(last.total).toBe(3);
+  });
+
   // --- regression tests for review findings --------------------------------
 
   it("skips a file whose remote blob is corrupted, without writing garbage (sec-M1)", async () => {

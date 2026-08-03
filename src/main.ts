@@ -7,11 +7,21 @@ import { ObsidianIndexStore, ObsidianVaultFiles } from "./obsidian-adapters";
 import { S3SyncSettingTab } from "./settings-tab";
 import { MassDeleteConfirmModal, VersionHistoryModal } from "./ui/modals";
 import { StatusBarController } from "./ui/status-bar";
-import { DEFAULT_SETTINGS, type PluginSettings, type SyncStatus } from "./types";
+import { isSyncablePath } from "./sync/filters";
+import { DEFAULT_SETTINGS, type PluginSettings, type SyncStats, type SyncStatus } from "./types";
+
+const IDLE_STATUS: SyncStatus = {
+  phase: "idle",
+  message: "",
+  lastSyncAt: null,
+  pendingOps: 0,
+  completedOps: 0,
+  plannedOps: 0,
+};
 
 export default class S3SyncPlugin extends Plugin {
   override settings: PluginSettings = DEFAULT_SETTINGS;
-  private status: SyncStatus = { phase: "idle", message: "", lastSyncAt: null, pendingOps: 0 };
+  private status: SyncStatus = { ...IDLE_STATUS };
   private statusBar: StatusBarController | null = null;
   private indexStore!: ObsidianIndexStore;
   private syncing = false;
@@ -106,7 +116,14 @@ export default class S3SyncPlugin extends Plugin {
           new Promise<boolean>((resolve) => {
             new MassDeleteConfirmModal(this.app, localDeletes, remoteDeletes, total, resolve).open();
           }),
-        onProgress: (message) => this.setStatus({ ...this.status, phase: "pushing", message }),
+        onProgress: (p) =>
+          this.setStatus({
+            ...this.status,
+            phase: "pushing",
+            message: p.message,
+            completedOps: p.completed,
+            plannedOps: p.total,
+          }),
       },
     );
     return { engine, remote };
@@ -146,9 +163,47 @@ export default class S3SyncPlugin extends Plugin {
 
   // ---- sync -----------------------------------------------------------------
 
+  private readonly statusListeners = new Set<(status: SyncStatus) => void>();
+
+  /** Subscribe to live sync-status updates (used by the settings panel). Returns a disposer. */
+  onStatusChange(listener: (status: SyncStatus) => void): () => void {
+    this.statusListeners.add(listener);
+    listener(this.status);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  getStatus(): SyncStatus {
+    return this.status;
+  }
+
   private setStatus(next: SyncStatus): void {
     this.status = next;
     this.statusBar?.render(next);
+    for (const listener of this.statusListeners) listener(next);
+  }
+
+  /**
+   * Count of syncable files currently in the vault (filters applied) and how
+   * many are already tracked in the local sync index.
+   */
+  async getSyncStats(): Promise<SyncStats> {
+    let vaultObjects = 0;
+    let vaultBytes = 0;
+    for (const file of this.app.vault.getFiles()) {
+      if (!isSyncablePath(file.path, this.settings.filters)) continue;
+      if (this.settings.filters.maxFileSize > 0 && file.stat.size > this.settings.filters.maxFileSize) continue;
+      vaultObjects++;
+      vaultBytes += file.stat.size;
+    }
+    const index = await this.indexStore.load();
+    const syncedObjects = index ? Object.keys(index.files).length : 0;
+    return {
+      vaultObjects,
+      vaultBytes,
+      syncedObjects,
+      lastSyncAt: this.status.lastSyncAt,
+      lastSummary: this.status.message,
+    };
   }
 
   async syncNow(trigger: "manual" | "auto" | "interval" | "startup"): Promise<void> {
@@ -161,12 +216,16 @@ export default class S3SyncPlugin extends Plugin {
       return;
     }
     this.syncing = true;
-    this.setStatus({ ...this.status, phase: "scanning", message: "Starting sync" });
+    this.setStatus({ ...this.status, phase: "scanning", message: "Starting sync", completedOps: 0, plannedOps: 0 });
     try {
       const { engine, remote } = this.buildEngine();
       await remote.initialize();
       const summary = await engine.syncOnce();
-      this.setStatus({ phase: "idle", message: this.describe(summary), lastSyncAt: Date.now(), pendingOps: 0 });
+      this.setStatus({
+        ...IDLE_STATUS,
+        message: this.describe(summary),
+        lastSyncAt: Date.now(),
+      });
       if (trigger === "manual") new Notice(`S3 Sync: ${this.describe(summary)}`);
       if (summary.errors.length > 0) {
         console.warn("[s3-sync] completed with errors", summary.errors);

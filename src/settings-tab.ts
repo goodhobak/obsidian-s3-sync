@@ -1,7 +1,11 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, TFolder } from "obsidian";
 import type S3SyncPlugin from "./main";
+import type { SyncStatus } from "./types";
 
 export class S3SyncSettingTab extends PluginSettingTab {
+  private statusDisposer: (() => void) | null = null;
+  private folderFilter = "";
+
   constructor(
     app: App,
     private readonly plugin: S3SyncPlugin,
@@ -9,9 +13,18 @@ export class S3SyncSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  override hide(): void {
+    this.statusDisposer?.();
+    this.statusDisposer = null;
+  }
+
   override display(): void {
     const { containerEl } = this;
+    this.statusDisposer?.();
+    this.statusDisposer = null;
     containerEl.empty();
+
+    this.renderStatistics(containerEl);
     const s = this.plugin.settings;
 
     new Setting(containerEl).setName("Connection").setHeading();
@@ -130,18 +143,7 @@ export class S3SyncSettingTab extends PluginSettingTab {
         }),
       );
 
-    new Setting(containerEl)
-      .setName("Excluded folders")
-      .setDesc("One vault-relative folder per line.")
-      .addTextArea((t) =>
-        t.setValue(s.filters.excludedFolders.join("\n")).onChange(async (v) => {
-          s.filters.excludedFolders = v
-            .split("\n")
-            .map((f) => f.trim())
-            .filter((f) => f.length > 0);
-          await this.plugin.saveSettings();
-        }),
-      );
+    this.renderExcludedFolders(containerEl);
 
     new Setting(containerEl)
       .setName("Maximum file size (MB)")
@@ -225,7 +227,141 @@ export class S3SyncSettingTab extends PluginSettingTab {
           .onClick(async () => {
             await this.plugin.resetSyncState();
             new Notice("S3 Sync: local sync state was reset");
+            void this.refreshStatistics();
           }),
       );
+  }
+
+  // ---- statistics -----------------------------------------------------------
+
+  private statsValueEl: HTMLElement | null = null;
+  private progressEl: HTMLElement | null = null;
+
+  private renderStatistics(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Status & statistics").setHeading();
+
+    const box = containerEl.createDiv({ cls: "s3-sync-stats" });
+    this.progressEl = box.createDiv({ cls: "s3-sync-stats-progress" });
+    this.statsValueEl = box.createDiv({ cls: "s3-sync-stats-values" });
+
+    new Setting(containerEl)
+      .setName("Refresh statistics")
+      .setDesc("Recount syncable objects in the vault and how many are already synced.")
+      .addButton((b) => b.setButtonText("Refresh").onClick(() => void this.refreshStatistics()));
+
+    // Live progress: update on every sync-status change while this tab is open.
+    this.statusDisposer = this.plugin.onStatusChange((status) => this.renderProgress(status));
+    void this.refreshStatistics();
+  }
+
+  private renderProgress(status: SyncStatus): void {
+    if (!this.progressEl) return;
+    const busy = status.phase === "scanning" || status.phase === "pulling" || status.phase === "pushing";
+    if (busy && status.plannedOps > 0) {
+      const pct = Math.round((status.completedOps / status.plannedOps) * 100);
+      this.progressEl.setText(`Syncing… ${status.completedOps} / ${status.plannedOps} objects (${pct}%)`);
+    } else if (busy) {
+      this.progressEl.setText(`Syncing… ${status.message}`);
+    } else if (status.phase === "error") {
+      this.progressEl.setText(`Last sync failed: ${status.message}`);
+    } else {
+      const when = status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : "never";
+      this.progressEl.setText(`Idle — last sync: ${when}${status.message ? ` (${status.message})` : ""}`);
+    }
+  }
+
+  private async refreshStatistics(): Promise<void> {
+    if (!this.statsValueEl) return;
+    const stats = await this.plugin.getSyncStats();
+    const mb = (stats.vaultBytes / (1024 * 1024)).toFixed(1);
+    const remaining = Math.max(0, stats.vaultObjects - stats.syncedObjects);
+    this.statsValueEl.empty();
+    const rows: Array<[string, string]> = [
+      ["Syncable objects in vault", `${stats.vaultObjects} (${mb} MB)`],
+      ["Synced (tracked in index)", `${stats.syncedObjects}`],
+      ["Not yet synced", `${remaining}`],
+    ];
+    for (const [label, value] of rows) {
+      const row = this.statsValueEl.createDiv({ cls: "s3-sync-stats-row" });
+      row.createSpan({ cls: "s3-sync-stats-label", text: label });
+      row.createSpan({ cls: "s3-sync-stats-value", text: value });
+    }
+    this.renderProgress(this.plugin.getStatus());
+  }
+
+  // ---- excluded folders (searchable checkbox list) --------------------------
+
+  private allFolders(): string[] {
+    const out: string[] = [];
+    for (const file of this.app.vault.getAllLoadedFiles()) {
+      if (!(file instanceof TFolder) || file.isRoot()) continue;
+      const path = file.path;
+      if (path.split("/").some((seg) => seg.startsWith("."))) continue; // hidden folders never sync
+      out.push(path);
+    }
+    return out.sort((a, b) => a.localeCompare(b));
+  }
+
+  private renderExcludedFolders(containerEl: HTMLElement): void {
+    const s = this.plugin.settings;
+    new Setting(containerEl)
+      .setName("Excluded folders")
+      .setDesc("Check folders to skip. Use the search box to narrow a large vault.");
+
+    const search = new Setting(containerEl).setName("Filter folders").addText((t) =>
+      t.setPlaceholder("Type to filter…").setValue(this.folderFilter).onChange((v) => {
+        this.folderFilter = v;
+        renderList();
+      }),
+    );
+    search.settingEl.addClass("s3-sync-folder-search");
+
+    const list = containerEl.createDiv({ cls: "s3-sync-folder-list" });
+    const MAX_ROWS = 60;
+
+    const renderList = (): void => {
+      list.empty();
+      const excluded = new Set(s.filters.excludedFolders.map((f) => f.replace(/^\/+|\/+$/g, "")));
+      const filter = this.folderFilter.trim().toLowerCase();
+      const folders = this.allFolders();
+
+      // Currently-excluded folders always appear (so they can be unchecked),
+      // then the search matches, capped for large vaults.
+      const excludedFirst = folders.filter((f) => excluded.has(f));
+      const matches = folders.filter(
+        (f) => !excluded.has(f) && (filter === "" || f.toLowerCase().includes(filter)),
+      );
+      const shown = [...excludedFirst, ...matches.slice(0, MAX_ROWS)];
+
+      if (folders.length === 0) {
+        list.createDiv({ cls: "s3-sync-folder-empty", text: "No folders in this vault." });
+        return;
+      }
+
+      for (const path of shown) {
+        const row = list.createDiv({ cls: "s3-sync-folder-row" });
+        const cb = row.createEl("input", { type: "checkbox" });
+        cb.checked = excluded.has(path);
+        row.createSpan({ text: path });
+        cb.addEventListener("change", async () => {
+          const set = new Set(s.filters.excludedFolders.map((f) => f.replace(/^\/+|\/+$/g, "")));
+          if (cb.checked) set.add(path);
+          else set.delete(path);
+          s.filters.excludedFolders = [...set].sort();
+          await this.plugin.saveSettings();
+          void this.refreshStatistics(); // excluded folders change the syncable count
+        });
+      }
+
+      const hiddenCount = matches.length - Math.min(matches.length, MAX_ROWS);
+      if (hiddenCount > 0) {
+        list.createDiv({
+          cls: "s3-sync-folder-empty",
+          text: `…and ${hiddenCount} more. Refine the filter to see them.`,
+        });
+      }
+    };
+
+    renderList();
   }
 }

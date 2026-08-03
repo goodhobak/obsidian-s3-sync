@@ -119,6 +119,22 @@ export interface SyncStatus {
   message: string;
   lastSyncAt: number | null;
   pendingOps: number;
+  /** File operations completed in the current (or most recent) sync. */
+  completedOps: number;
+  /** File operations planned for the current sync (0 when idle). */
+  plannedOps: number;
+}
+
+/** Snapshot of what is and isn't synced, for the settings statistics panel. */
+export interface SyncStats {
+  /** Syncable files currently in the vault (filters applied). */
+  vaultObjects: number;
+  /** Total bytes of those syncable files. */
+  vaultBytes: number;
+  /** Files tracked in the local sync index (already synced). */
+  syncedObjects: number;
+  lastSyncAt: number | null;
+  lastSummary: string;
 }
 
 export function emptyManifest(): RemoteManifest {

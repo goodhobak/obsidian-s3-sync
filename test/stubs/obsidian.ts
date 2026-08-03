@@ -6,7 +6,12 @@ export class Setting {}
 export class PluginSettingTab {}
 export class App {}
 export class TFile {}
-export class TFolder {}
+export class TFolder {
+  path = "";
+  isRoot(): boolean {
+    return this.path === "" || this.path === "/";
+  }
+}
 export function normalizePath(p: string): string {
   return p;
 }
