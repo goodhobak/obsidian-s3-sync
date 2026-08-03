@@ -1,10 +1,15 @@
 import { App, Notice, PluginSettingTab, Setting, TFolder } from "obsidian";
 import type S3SyncPlugin from "./main";
+import { toggleFolderExclusion } from "./sync/filters";
 import type { SyncStatus } from "./types";
 
 export class S3SyncSettingTab extends PluginSettingTab {
   private statusDisposer: (() => void) | null = null;
   private folderFilter = "";
+  /** When on, toggling a folder also toggles every folder beneath it. */
+  private includeSubfolders = false;
+  /** Staged exclusion set — committed to settings only when Apply is pressed. */
+  private pendingExcluded: Set<string> | null = null;
 
   constructor(
     app: App,
@@ -302,11 +307,29 @@ export class S3SyncSettingTab extends PluginSettingTab {
     return out.sort((a, b) => a.localeCompare(b));
   }
 
+  private savedExclusionSet(): Set<string> {
+    return new Set(this.plugin.settings.filters.excludedFolders.map((f) => f.replace(/^\/+|\/+$/g, "")));
+  }
+
   private renderExcludedFolders(containerEl: HTMLElement): void {
-    const s = this.plugin.settings;
-    new Setting(containerEl)
+    // Start staging from the currently-saved exclusions.
+    this.pendingExcluded = this.savedExclusionSet();
+
+    const heading = new Setting(containerEl)
       .setName("Excluded folders")
-      .setDesc("Check folders to skip. Use the search box to narrow a large vault.");
+      .setDesc("Check folders to skip, then press Apply. Use the search box to narrow a large vault.");
+
+    // Live count label in the heading (updates as you stage / apply).
+    const countEl = heading.nameEl.createSpan({ cls: "s3-sync-folder-count" });
+
+    new Setting(containerEl)
+      .setName("Include subfolders")
+      .setDesc("When on, checking a folder also checks every folder beneath it.")
+      .addToggle((t) =>
+        t.setValue(this.includeSubfolders).onChange((v) => {
+          this.includeSubfolders = v;
+        }),
+      );
 
     const search = new Setting(containerEl).setName("Filter folders").addText((t) =>
       t.setPlaceholder("Type to filter…").setValue(this.folderFilter).onChange((v) => {
@@ -319,37 +342,73 @@ export class S3SyncSettingTab extends PluginSettingTab {
     const list = containerEl.createDiv({ cls: "s3-sync-folder-list" });
     const MAX_ROWS = 60;
 
+    const applyRow = new Setting(containerEl);
+    let applyBtnRef: import("obsidian").ButtonComponent | null = null;
+    applyRow
+      .addButton((b) => {
+        applyBtnRef = b;
+        b.setButtonText("Apply")
+          .setCta()
+          .onClick(async () => {
+            const pending = this.pendingExcluded ?? new Set<string>();
+            this.plugin.settings.filters.excludedFolders = [...pending].sort();
+            await this.plugin.saveSettings();
+            await this.refreshStatistics(); // excluded folders change the syncable count
+            updateCount();
+          });
+      })
+      .addExtraButton((b) =>
+        b
+          .setIcon("rotate-ccw")
+          .setTooltip("Revert unsaved changes")
+          .onClick(() => {
+            this.pendingExcluded = this.savedExclusionSet();
+            renderList();
+          }),
+      );
+
+    const updateCount = (): void => {
+      const pending = this.pendingExcluded ?? new Set<string>();
+      const saved = this.savedExclusionSet();
+      const dirty = pending.size !== saved.size || [...pending].some((p) => !saved.has(p));
+      countEl.setText(` — ${saved.size} applied${dirty ? `, ${pending.size} staged` : ""}`);
+      applyBtnRef?.setDisabled(!dirty);
+      applyRow.setDesc(dirty ? "You have unsaved changes." : "No unsaved changes.");
+    };
+
     const renderList = (): void => {
       list.empty();
-      const excluded = new Set(s.filters.excludedFolders.map((f) => f.replace(/^\/+|\/+$/g, "")));
+      const pending = this.pendingExcluded ?? new Set<string>();
       const filter = this.folderFilter.trim().toLowerCase();
       const folders = this.allFolders();
 
-      // Currently-excluded folders always appear (so they can be unchecked),
-      // then the search matches, capped for large vaults.
-      const excludedFirst = folders.filter((f) => excluded.has(f));
-      const matches = folders.filter(
-        (f) => !excluded.has(f) && (filter === "" || f.toLowerCase().includes(filter)),
-      );
-      const shown = [...excludedFirst, ...matches.slice(0, MAX_ROWS)];
-
       if (folders.length === 0) {
         list.createDiv({ cls: "s3-sync-folder-empty", text: "No folders in this vault." });
+        updateCount();
         return;
       }
+
+      // Staged-excluded folders always appear (so they can be unchecked), then
+      // the search matches, capped for large vaults.
+      const excludedFirst = folders.filter((f) => pending.has(f));
+      const matches = folders.filter((f) => !pending.has(f) && (filter === "" || f.toLowerCase().includes(filter)));
+      const shown = [...excludedFirst, ...matches.slice(0, MAX_ROWS)];
 
       for (const path of shown) {
         const row = list.createDiv({ cls: "s3-sync-folder-row" });
         const cb = row.createEl("input", { type: "checkbox" });
-        cb.checked = excluded.has(path);
+        cb.checked = pending.has(path);
         row.createSpan({ text: path });
-        cb.addEventListener("change", async () => {
-          const set = new Set(s.filters.excludedFolders.map((f) => f.replace(/^\/+|\/+$/g, "")));
-          if (cb.checked) set.add(path);
-          else set.delete(path);
-          s.filters.excludedFolders = [...set].sort();
-          await this.plugin.saveSettings();
-          void this.refreshStatistics(); // excluded folders change the syncable count
+        cb.addEventListener("change", () => {
+          this.pendingExcluded = toggleFolderExclusion(
+            this.pendingExcluded ?? new Set<string>(),
+            path,
+            cb.checked,
+            this.includeSubfolders,
+            folders,
+          );
+          // Re-render so subtree checkboxes reflect the change immediately.
+          renderList();
         });
       }
 
@@ -360,6 +419,7 @@ export class S3SyncSettingTab extends PluginSettingTab {
           text: `…and ${hiddenCount} more. Refine the filter to see them.`,
         });
       }
+      updateCount();
     };
 
     renderList();

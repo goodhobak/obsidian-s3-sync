@@ -9,6 +9,33 @@ export function extensionOf(path: string): string {
   return dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();
 }
 
+/** `folder` itself plus every folder nested beneath it, restricted to `all`. */
+export function folderWithDescendants(folder: string, all: readonly string[]): string[] {
+  const prefix = folder + "/";
+  return all.filter((f) => f === folder || f.startsWith(prefix));
+}
+
+/**
+ * Toggle a folder in an exclusion set. When `includeSubfolders` is true, the
+ * folder's whole subtree (as present in `allFolders`) is toggled together;
+ * otherwise only the folder itself. Returns a new set.
+ */
+export function toggleFolderExclusion(
+  current: ReadonlySet<string>,
+  folder: string,
+  select: boolean,
+  includeSubfolders: boolean,
+  allFolders: readonly string[],
+): Set<string> {
+  const next = new Set(current);
+  const targets = includeSubfolders ? folderWithDescendants(folder, allFolders) : [folder];
+  for (const t of targets) {
+    if (select) next.add(t);
+    else next.delete(t);
+  }
+  return next;
+}
+
 /**
  * Whether a vault-relative path participates in sync.
  * Markdown always syncs; other extensions are opt-in. Hidden files/folders

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { conflictCopyPath, extensionOf, isSyncablePath } from "../src/sync/filters";
+import {
+  conflictCopyPath,
+  extensionOf,
+  folderWithDescendants,
+  isSyncablePath,
+  toggleFolderExclusion,
+} from "../src/sync/filters";
 import { DEFAULT_SETTINGS } from "../src/types";
 
 const filters = { ...DEFAULT_SETTINGS.filters, excludedFolders: ["private", "/slashed/"] };
@@ -58,5 +64,46 @@ describe("conflictCopyPath", () => {
 
   it("appends for extension-less files", () => {
     expect(conflictCopyPath("notes/foo", at)).toBe("notes/foo (conflict 2026-08-03 154233)");
+  });
+});
+
+const TREE = ["a", "a/b", "a/b/c", "a/b/d", "a/e", "z", "z/y"];
+
+describe("folderWithDescendants", () => {
+  it("returns the folder and everything nested beneath it", () => {
+    expect(folderWithDescendants("a/b", TREE).sort()).toEqual(["a/b", "a/b/c", "a/b/d"]);
+  });
+
+  it("does not match sibling prefixes (a/b !~> a/be)", () => {
+    const t = ["a/b", "a/be", "a/b/c"];
+    expect(folderWithDescendants("a/b", t).sort()).toEqual(["a/b", "a/b/c"]);
+  });
+
+  it("returns just the leaf when it has no children", () => {
+    expect(folderWithDescendants("a/b/c", TREE)).toEqual(["a/b/c"]);
+  });
+});
+
+describe("toggleFolderExclusion", () => {
+  it("adds only the folder itself when includeSubfolders is off", () => {
+    const next = toggleFolderExclusion(new Set(), "a/b", true, false, TREE);
+    expect([...next]).toEqual(["a/b"]);
+  });
+
+  it("adds the whole subtree when includeSubfolders is on", () => {
+    const next = toggleFolderExclusion(new Set(), "a/b", true, true, TREE);
+    expect([...next].sort()).toEqual(["a/b", "a/b/c", "a/b/d"]);
+  });
+
+  it("removes the whole subtree when unchecked with includeSubfolders on", () => {
+    const start = new Set(["a", "a/b", "a/b/c", "a/b/d", "a/e"]);
+    const next = toggleFolderExclusion(start, "a/b", false, true, TREE);
+    expect([...next].sort()).toEqual(["a", "a/e"]);
+  });
+
+  it("does not mutate the input set", () => {
+    const start = new Set(["x"]);
+    toggleFolderExclusion(start, "a/b", true, true, TREE);
+    expect([...start]).toEqual(["x"]);
   });
 });

@@ -70,6 +70,12 @@
   padding: 4px 0;
 }
 
+.s3-sync-folder-count {
+  color: var(--text-muted);
+  font-weight: var(--font-normal);
+  font-size: var(--font-ui-smaller);
+}
+
 /* Wider modal for history / resolve / log views. */
 .s3-sync-wide-modal {
   width: min(860px, 92vw);
