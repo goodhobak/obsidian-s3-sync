@@ -42,7 +42,8 @@ encryption. Works on desktop and mobile.
   (conflict copy) or a file fails to sync, the **Resolve conflicts and errors**
   command (or the "Resolve" link in the notice / sync log) opens a window to
   compare the two versions and choose *keep remote*, *use my version*, or *open
-  both to merge by hand*; failed files get a one-click retry.
+  both to merge by hand*; failed files get a one-click retry. A bulk bar at the
+  top applies *keep all remote*, *use all my versions*, or *retry all* at once.
 - **End-to-end encryption (optional)** — AES-256-GCM with keys derived from a
   passphrase (PBKDF2, 600k iterations). File contents *and* the manifest are
   encrypted; object keys are opaque ids, so the server learns neither your

@@ -89,6 +89,21 @@
   align-items: center;
 }
 
+.s3-sync-resolve-bulk {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
 /* Diff rendering. */
 .s3-sync-diff {
   max-height: 320px;

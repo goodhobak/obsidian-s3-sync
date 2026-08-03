@@ -45,6 +45,8 @@ export class ResolveModal extends Modal {
       return;
     }
 
+    this.renderBulkBar(contentEl);
+
     if (this.conflicts.length > 0) {
       contentEl.createEl("h3", { text: `Conflicts (${this.conflicts.length})` });
       contentEl.createEl("p", {
@@ -60,6 +62,67 @@ export class ResolveModal extends Modal {
       contentEl.createEl("h3", { text: `Errors (${this.failures.length})` });
       for (const f of [...this.failures]) this.renderFailure(contentEl, f);
     }
+  }
+
+  /** Top bar with actions that apply to every outstanding item at once. */
+  private renderBulkBar(container: HTMLElement): void {
+    const bar = container.createDiv({ cls: "s3-sync-resolve-bulk" });
+    bar.createSpan({ cls: "s3-sync-version-meta", text: "Apply to all:" });
+
+    if (this.conflicts.length > 0) {
+      const keepAll = bar.createEl("button", { text: `Keep all remote (${this.conflicts.length})` });
+      keepAll.addEventListener("click", () => void this.runBulkConflicts("keepRemote"));
+
+      const useAll = bar.createEl("button", { text: `Use all my versions (${this.conflicts.length})`, cls: "mod-cta" });
+      useAll.addEventListener("click", () => void this.runBulkConflicts("useMine"));
+    }
+
+    if (this.failures.length > 0) {
+      const retryAll = bar.createEl("button", { text: `Retry all (${this.failures.length})` });
+      retryAll.addEventListener("click", () => void this.runRetryAll());
+    }
+  }
+
+  private async runBulkConflicts(kind: "keepRemote" | "useMine"): Promise<void> {
+    const label = kind === "keepRemote" ? "Keep all remote" : "Use all my versions";
+    this.setBulkBusy(true, `${label}…`);
+    const targets = [...this.conflicts];
+    let done = 0;
+    const remaining: ConflictCopyRecord[] = [];
+    for (const c of targets) {
+      try {
+        if (kind === "keepRemote") await this.actions.keepCurrent(c.conflictCopy);
+        else await this.actions.useCopy(c.path, c.conflictCopy);
+        done++;
+      } catch {
+        remaining.push(c); // keep the ones that failed so the user can retry
+      }
+    }
+    this.conflicts = remaining;
+    new Notice(`S3 Sync: resolved ${done} conflict(s)${remaining.length ? `, ${remaining.length} failed` : ""}`);
+    this.render();
+  }
+
+  private async runRetryAll(): Promise<void> {
+    this.setBulkBusy(true, "Retrying all…");
+    try {
+      await this.actions.retrySync();
+      this.failures = [];
+      new Notice("S3 Sync: retried all failed files");
+    } catch (err) {
+      new Notice(`S3 Sync: retry failed — ${err instanceof Error ? err.message : String(err)}`, 8000);
+    }
+    this.render();
+  }
+
+  /** Disable the bulk bar's buttons while an operation runs. */
+  private setBulkBusy(busy: boolean, label: string): void {
+    const bar = this.contentEl.querySelector(".s3-sync-resolve-bulk");
+    if (!bar) return;
+    bar.querySelectorAll("button").forEach((b) => {
+      (b as HTMLButtonElement).disabled = busy;
+    });
+    if (busy) bar.createSpan({ cls: "s3-sync-version-meta", text: ` ${label}` });
   }
 
   private renderConflict(container: HTMLElement, c: ConflictCopyRecord): void {
