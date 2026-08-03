@@ -541,4 +541,77 @@ describe("SyncEngine", () => {
     expect(survivors.length).toBeGreaterThanOrEqual(1);
     expect(b.vault.read(survivors[0]!)).toBe("hello");
   });
+
+  it("isolates a single un-writable file — one bad name does not abort the sync (Windows)", async () => {
+    for (let i = 0; i < 4; i++) a.vault.write(`ok${i}.md`, `body ${i}`);
+    a.vault.write("bad:name?.md", "unwritable on windows");
+    await sync(a);
+
+    // Device b: simulate the OS rejecting the illegal filename on write.
+    const vault = b.vault;
+    const orig = vault.writeBinary.bind(vault);
+    vault.writeBinary = async (path, data, mtime) => {
+      if (path === "bad:name?.md") throw new Error('File name cannot contain: * " \\ / < > : | ?');
+      return orig(path, data, mtime);
+    };
+
+    const res = await sync(b); // must NOT throw
+    expect(res.pulled).toBe(4); // the 4 good files still synced
+    expect(res.failedFiles.map((f) => f.path)).toContain("bad:name?.md");
+    for (let i = 0; i < 4; i++) expect(b.vault.read(`ok${i}.md`)).toBe(`body ${i}`);
+  });
+
+  it("checkpoints the index during a large inbound sync (resumable on kill)", async () => {
+    for (let i = 0; i < 60; i++) a.vault.write(`f${i}.md`, `content ${i}`);
+    await sync(a);
+
+    const store = new InMemoryIndexStore();
+    let saves = 0;
+    const origSave = store.save.bind(store);
+    store.save = async (v) => {
+      saves++;
+      return origSave(v);
+    };
+    const engine = new SyncEngine(b.vault, b.remote, store, filters, { versionsToKeep: 5, massDeleteThreshold: 0.5 }, {
+      confirmMassDelete: async () => true,
+    });
+    await b.remote.initialize();
+    await engine.syncOnce();
+
+    // 60 pulls with CHECKPOINT_EVERY=25 => at least 2 mid-run checkpoints + final save.
+    expect(saves).toBeGreaterThanOrEqual(3);
+  });
+
+  it("resumes a killed inbound sync from a checkpoint (no restart from zero)", async () => {
+    for (let i = 0; i < 60; i++) a.vault.write(`g${i}.md`, `v${i}`);
+    await sync(a);
+
+    // First attempt on b is "killed" mid-run (simulate an OS termination via an
+    // uncaught throw once ~40 files have downloaded — past the 25-file checkpoint).
+    const store = new InMemoryIndexStore();
+    let downloads = 0;
+    const engine1 = new SyncEngine(b.vault, b.remote, store, filters, { versionsToKeep: 5, massDeleteThreshold: 0.5 }, {
+      confirmMassDelete: async () => true,
+      onProgress: (p) => {
+        if (p.message.startsWith("Downloading") && ++downloads >= 40) throw new Error("process killed");
+      },
+    });
+    await b.remote.initialize();
+    await expect(engine1.syncOnce()).rejects.toThrow("process killed");
+
+    // The 25-file checkpoint persisted; not everything was lost.
+    const checkpointed = Object.keys((await store.load())!.files).length;
+    expect(checkpointed).toBeGreaterThanOrEqual(25);
+
+    // Restart with the SAME index: a fresh sync completes the rest without
+    // re-pulling the already-synced files from zero.
+    const engine2 = new SyncEngine(b.vault, b.remote, store, filters, { versionsToKeep: 5, massDeleteThreshold: 0.5 }, {
+      confirmMassDelete: async () => true,
+    });
+    const res = await engine2.syncOnce();
+
+    for (let i = 0; i < 60; i++) expect(b.vault.read(`g${i}.md`)).toBe(`v${i}`);
+    expect(res.errors).toEqual([]);
+    expect(res.pulled).toBeLessThan(60); // resumed, did not re-download all 60
+  });
 });

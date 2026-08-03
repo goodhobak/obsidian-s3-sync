@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile, requestUrl } from "obsidian";
+import { Notice, Platform, Plugin, TFile, requestUrl } from "obsidian";
 import { ObsidianHttpClient } from "./http/client";
 import { S3Client } from "./s3/client";
 import { MassDeleteAbortError, SyncEngine, type SyncSummary } from "./sync/engine";
@@ -165,7 +165,7 @@ export default class S3SyncPlugin extends Plugin {
   private buildEngine(): { engine: SyncEngine; remote: RemoteStore } {
     const remote = new RemoteStore(this.buildS3(), this.settings);
     const engine = new SyncEngine(
-      new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig),
+      new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig, Platform.isWin),
       remote,
       this.indexStore,
       this.settings.filters,
@@ -411,7 +411,7 @@ export default class S3SyncPlugin extends Plugin {
       new Notice("S3 Sync: nothing to resolve");
       return;
     }
-    const files = new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig);
+    const files = new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig, Platform.isWin);
     const decoder = new TextDecoder();
     new ResolveModal(this.app, conflicts, failures, {
       readTextFile: async (path) => {

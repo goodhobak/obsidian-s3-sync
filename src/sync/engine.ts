@@ -18,6 +18,8 @@ import type { IndexStore, LocalFileStat, VaultFiles } from "./vault-files";
 const MAX_MANIFEST_RETRIES = 3;
 /** Below this many deletions the mass-delete guard stays quiet. */
 const MASS_DELETE_MIN_COUNT = 5;
+/** Persist the local index every this many pulls, so a killed sync can resume. */
+const CHECKPOINT_EVERY = 25;
 
 /** A deleted (tombstoned) file with its retained recoverable backups. */
 export interface DeletedFile {
@@ -288,6 +290,11 @@ export class SyncEngine {
     this.progress(this.opsTotal > 0 ? `Syncing ${this.opsTotal} object(s)` : "Up to date");
 
     // ---- pulls --------------------------------------------------------------
+    // The index is checkpointed every CHECKPOINT_EVERY pulls so a sync that is
+    // killed mid-run (mobile backgrounding / OS kill of a large inbound sync)
+    // resumes from where it stopped instead of restarting from zero. Checkpoints
+    // keep the OLD manifestRevision — it is only advanced once the sync completes.
+    let sincePersist = 0;
     for (const { path, entry } of pulls) {
       this.progress(`Downloading ${path}`);
       let body: ArrayBuffer | null;
@@ -306,8 +313,22 @@ export class SyncEngine {
         summary.failedFiles.push({ path, reason: "Remote blob is missing", kind: "missing" });
         continue;
       }
-      await this.files.writeBinary(path, body, entry.mtime);
+      try {
+        await this.files.writeBinary(path, body, entry.mtime);
+      } catch (err) {
+        // One un-writable file (e.g. a name with characters illegal on this OS)
+        // must not abort the whole sync — record it and keep going.
+        const reason = err instanceof Error ? err.message : String(err);
+        summary.errors.push(`Could not write ${path}: ${reason}`);
+        summary.failedFiles.push({ path, reason, kind: "other" });
+        this.opsDone++;
+        continue;
+      }
       index.files[path] = { hash: entry.hash, size: entry.size, mtime: entry.mtime, rev: entry.rev, blobKey: entry.blobKey };
+      if (++sincePersist >= CHECKPOINT_EVERY) {
+        sincePersist = 0;
+        await this.indexStore.save(index); // resumable checkpoint
+      }
       summary.pulled++;
       this.opsDone++;
       this.inbound++;

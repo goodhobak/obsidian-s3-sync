@@ -1,6 +1,7 @@
 import { App, Plugin, TFile, TFolder, normalizePath } from "obsidian";
 import type { LocalIndex, SyncLogEntry } from "./types";
 import type { IndexStore, LocalFileStat, VaultFiles } from "./sync/vault-files";
+import { desanitizeVaultPath, sanitizeVaultPath } from "./platform/filename";
 
 /**
  * VaultFiles over the live Obsidian vault.
@@ -10,6 +11,12 @@ import type { IndexStore, LocalFileStat, VaultFiles } from "./sync/vault-files";
  * is enabled they are enumerated and read/written through the raw `vault.adapter`
  * instead. `includeConfig` is a live getter so toggling the setting takes
  * effect without rebuilding the adapter.
+ *
+ * The engine always works in canonical vault paths (as stored in the remote
+ * manifest). When `sanitizeNames` is on (Windows), a file whose canonical name
+ * contains a Windows-illegal character is stored locally under a fullwidth-
+ * substituted name; every boundary translates canonical <-> local so this stays
+ * invisible to the engine and to other platforms.
  */
 export class ObsidianVaultFiles implements VaultFiles {
   private readonly configDir: string;
@@ -17,8 +24,19 @@ export class ObsidianVaultFiles implements VaultFiles {
   constructor(
     private readonly app: App,
     private readonly includeConfig: () => boolean = () => false,
+    private readonly sanitizeNames = false,
   ) {
     this.configDir = app.vault.configDir;
+  }
+
+  /** Canonical vault path -> on-disk local path. */
+  private toLocal(path: string): string {
+    return this.sanitizeNames ? sanitizeVaultPath(path) : path;
+  }
+
+  /** On-disk local path -> canonical vault path. */
+  private toCanonical(path: string): string {
+    return this.sanitizeNames ? desanitizeVaultPath(path) : path;
   }
 
   private isConfigPath(path: string): boolean {
@@ -26,7 +44,9 @@ export class ObsidianVaultFiles implements VaultFiles {
   }
 
   async listFiles(): Promise<LocalFileStat[]> {
-    const tracked = this.app.vault.getFiles().map((f) => ({ path: f.path, size: f.stat.size, mtime: f.stat.mtime }));
+    const tracked = this.app.vault
+      .getFiles()
+      .map((f) => ({ path: this.toCanonical(f.path), size: f.stat.size, mtime: f.stat.mtime }));
     if (!this.includeConfig()) return tracked;
     const config = await this.walkConfig(this.configDir);
     return [...tracked, ...config];
@@ -44,7 +64,7 @@ export class ObsidianVaultFiles implements VaultFiles {
     }
     for (const filePath of listing.files) {
       const st = await adapter.stat(filePath);
-      if (st) out.push({ path: filePath, size: st.size, mtime: st.mtime });
+      if (st) out.push({ path: this.toCanonical(filePath), size: st.size, mtime: st.mtime });
     }
     for (const folder of listing.folders) {
       out.push(...(await this.walkConfig(folder)));
@@ -58,19 +78,21 @@ export class ObsidianVaultFiles implements VaultFiles {
   }
 
   async readBinary(path: string): Promise<ArrayBuffer> {
-    if (this.isConfigPath(path)) return this.app.vault.adapter.readBinary(path);
-    const file = this.fileAt(path);
+    const local = this.toLocal(path);
+    if (this.isConfigPath(local)) return this.app.vault.adapter.readBinary(local);
+    const file = this.fileAt(local);
     if (!file) throw new Error(`File not found: ${path}`);
     return this.app.vault.readBinary(file);
   }
 
   async writeBinary(path: string, data: ArrayBuffer, mtime?: number): Promise<void> {
-    if (this.isConfigPath(path)) {
-      await this.ensureAdapterFolders(path);
-      await this.app.vault.adapter.writeBinary(path, data, mtime ? { mtime } : undefined);
+    const local = this.toLocal(path);
+    if (this.isConfigPath(local)) {
+      await this.ensureAdapterFolders(local);
+      await this.app.vault.adapter.writeBinary(local, data, mtime ? { mtime } : undefined);
       return;
     }
-    const normalized = normalizePath(path);
+    const normalized = normalizePath(local);
     await this.ensureParentFolders(normalized);
     const existing = this.fileAt(normalized);
     const options = mtime ? { mtime } : undefined;
@@ -112,28 +134,31 @@ export class ObsidianVaultFiles implements VaultFiles {
   }
 
   async delete(path: string): Promise<void> {
-    if (this.isConfigPath(path)) {
+    const local = this.toLocal(path);
+    if (this.isConfigPath(local)) {
       // Config files aren't tracked; remove directly (remote history keeps a copy).
-      if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+      if (await this.app.vault.adapter.exists(local)) await this.app.vault.adapter.remove(local);
       return;
     }
-    const file = this.fileAt(path);
+    const file = this.fileAt(local);
     // Follow the user's trash preference instead of destroying content outright.
     if (file) await this.app.fileManager.trashFile(file);
   }
 
   async exists(path: string): Promise<boolean> {
-    if (this.isConfigPath(path)) return this.app.vault.adapter.exists(path);
-    return this.fileAt(path) !== null;
+    const local = this.toLocal(path);
+    if (this.isConfigPath(local)) return this.app.vault.adapter.exists(local);
+    return this.fileAt(local) !== null;
   }
 
   async stat(path: string): Promise<LocalFileStat | null> {
-    if (this.isConfigPath(path)) {
-      const st = await this.app.vault.adapter.stat(path);
+    const local = this.toLocal(path);
+    if (this.isConfigPath(local)) {
+      const st = await this.app.vault.adapter.stat(local);
       return st && st.type === "file" ? { path, size: st.size, mtime: st.mtime } : null;
     }
-    const file = this.fileAt(path);
-    return file ? { path: file.path, size: file.stat.size, mtime: file.stat.mtime } : null;
+    const file = this.fileAt(local);
+    return file ? { path, size: file.stat.size, mtime: file.stat.mtime } : null;
   }
 }
 
