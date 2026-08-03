@@ -39,6 +39,10 @@ export interface SyncProgress {
   completed: number;
   /** File operations planned for this sync (0 until the plan is known). */
   total: number;
+  /** Inbound files downloaded so far (pulls). */
+  inbound: number;
+  /** Outbound files uploaded so far (pushes). */
+  outbound: number;
 }
 
 export interface EngineCallbacks {
@@ -89,15 +93,17 @@ export class SyncEngine {
 
   private opsDone = 0;
   private opsTotal = 0;
+  private inbound = 0;
+  private outbound = 0;
 
   private progress(message: string): void {
-    this.callbacks.onProgress?.({ message, completed: this.opsDone, total: this.opsTotal });
-  }
-
-  /** Mark one planned file operation complete and report progress. */
-  private step(message: string): void {
-    this.opsDone++;
-    this.progress(message);
+    this.callbacks.onProgress?.({
+      message,
+      completed: this.opsDone,
+      total: this.opsTotal,
+      inbound: this.inbound,
+      outbound: this.outbound,
+    });
   }
 
   /** Full reconcile cycle; retries when another device wins the manifest race. */
@@ -270,6 +276,8 @@ export class SyncEngine {
     // generate an extra push bump opsTotal in resolveConflict.
     this.opsTotal = pulls.length + conflicts.length + pushes.length + tombstonePushes.length + localDeletes.length;
     this.opsDone = 0;
+    this.inbound = 0;
+    this.outbound = 0;
     this.progress(this.opsTotal > 0 ? `Syncing ${this.opsTotal} object(s)` : "Up to date");
 
     // ---- pulls --------------------------------------------------------------
@@ -295,6 +303,7 @@ export class SyncEngine {
       index.files[path] = { hash: entry.hash, size: entry.size, mtime: entry.mtime, rev: entry.rev, blobKey: entry.blobKey };
       summary.pulled++;
       this.opsDone++;
+      this.inbound++;
     }
 
     // ---- conflicts ----------------------------------------------------------
@@ -343,6 +352,7 @@ export class SyncEngine {
       manifestDirty = true;
       summary.pushed++;
       this.opsDone++;
+      this.outbound++;
     }
 
     // ---- deletion propagation (local -> remote tombstones) ------------------

@@ -19,6 +19,13 @@ export interface SyncFilterSettings {
   excludedFolders: string[];
   /** Maximum file size in bytes; 0 = unlimited. */
   maxFileSize: number;
+  /**
+   * Sync the `.obsidian` config folder too (plugins, themes, snippets,
+   * settings). The plugin's own folder and per-device workspace files are
+   * always excluded. Off by default — config sync can carry device-specific
+   * state between machines.
+   */
+  syncObsidianConfig: boolean;
 }
 
 export interface PluginSettings {
@@ -54,6 +61,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "mp3", "wav", "m4a", "ogg", "mp4", "webm", "mov", "pdf"],
     excludedFolders: [],
     maxFileSize: 0,
+    syncObsidianConfig: false,
   },
   autoSync: true,
   syncIntervalSeconds: 300,
@@ -123,6 +131,10 @@ export interface SyncStatus {
   completedOps: number;
   /** File operations planned for the current sync (0 when idle). */
   plannedOps: number;
+  /** Inbound files downloaded from remote so far (pulls). */
+  inbound: number;
+  /** Outbound files uploaded to remote so far (pushes). */
+  outbound: number;
 }
 
 /** A conflict where both versions were kept: remote took the path, ours is a copy. */

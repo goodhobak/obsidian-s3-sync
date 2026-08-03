@@ -6,7 +6,16 @@ export class StatusBarController {
     el.addClass("s3-sync-status-bar");
     el.setAttribute("aria-label", "S3 Sync — click to sync now");
     el.addEventListener("click", onClick);
-    this.render({ phase: "idle", message: "", lastSyncAt: null, pendingOps: 0, completedOps: 0, plannedOps: 0 });
+    this.render({
+      phase: "idle",
+      message: "",
+      lastSyncAt: null,
+      pendingOps: 0,
+      completedOps: 0,
+      plannedOps: 0,
+      inbound: 0,
+      outbound: 0,
+    });
   }
 
   render(status: SyncStatus): void {
@@ -20,8 +29,11 @@ export class StatusBarController {
       case "scanning":
       case "pulling":
       case "pushing": {
+        // Show inbound (↓) / outbound (↑) direction plus overall progress.
+        const io = status.inbound || status.outbound ? ` ↓${status.inbound} ↑${status.outbound}` : "";
         const count = status.plannedOps > 0 ? ` ${status.completedOps}/${status.plannedOps}` : "";
-        this.el.setText(`S3 ⟳${count || " " + (status.message || "syncing")}`);
+        const detail = io || count ? `${count}${io}` : ` ${status.message || "syncing"}`;
+        this.el.setText(`S3 ⟳${detail}`);
         break;
       }
       case "error":

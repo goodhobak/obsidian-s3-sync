@@ -1,6 +1,27 @@
 node_modules/
+
+# Build artifact (attached to GitHub Releases instead of committed)
 main.js
 *.map
+
+# OS
 .DS_Store
+
+# Server config & secret value files — never commit endpoints/keys/credentials
 .env
+.env.*
+*.local
+secrets*.json
+config.local.*
+deploy.*.json
+*.pem
+*.key
+
+# Obsidian plugin runtime state (holds S3 secret key + passphrase)
 data.json
+sync-index.json
+sync-log.json
+
+# Agent/session state (not part of the plugin)
+.omc/
+.claude/

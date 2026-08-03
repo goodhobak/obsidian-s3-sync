@@ -36,10 +36,38 @@ export function toggleFolderExclusion(
   return next;
 }
 
+/** The vault's config folder. Obsidian defaults to `.obsidian`. */
+export const CONFIG_DIR = ".obsidian";
+/** This plugin's own folder — never synced (holds secrets + local sync state). */
+export const OWN_PLUGIN_DIR = `${CONFIG_DIR}/plugins/s3-sync`;
+
+/**
+ * Which `.obsidian` config paths are safe to sync. Excludes:
+ *  - this plugin's own folder (data.json holds the S3 secret + passphrase;
+ *    sync-index/sync-log are per-device state),
+ *  - per-device workspace layout files (they thrash constantly),
+ *  - nested hidden files (.DS_Store, .git, …),
+ *  - the Trash.
+ */
+export function isSyncableConfigPath(path: string): boolean {
+  if (path === OWN_PLUGIN_DIR || path.startsWith(OWN_PLUGIN_DIR + "/")) return false;
+  const rest = path.slice(CONFIG_DIR.length + 1).split("/");
+  if (rest.some((s) => s.startsWith("."))) return false; // nested hidden files
+  const deviceLocal = new Set([
+    "workspace.json",
+    "workspace-mobile.json",
+    "workspace",
+  ]);
+  if (rest.length === 1 && deviceLocal.has(rest[0]!)) return false;
+  if (rest[0] === "trash") return false;
+  return true;
+}
+
 /**
  * Whether a vault-relative path participates in sync.
  * Markdown always syncs; other extensions are opt-in. Hidden files/folders
- * (dot-prefixed) never sync. Size is checked separately by the scanner.
+ * (dot-prefixed) never sync — except the `.obsidian` config folder when
+ * `syncObsidianConfig` is on. Size is checked separately by the scanner.
  */
 export function isSyncablePath(path: string, filters: SyncFilterSettings): boolean {
   if (path.length === 0) return false;
@@ -47,11 +75,23 @@ export function isSyncablePath(path: string, filters: SyncFilterSettings): boole
   // is not a clean relative vault path (traversal, absolute, backslash, NUL).
   if (path.includes("\\") || path.includes("\0")) return false;
   const segments = path.split("/");
-  if (segments.some((s) => s.length === 0 || s.startsWith("."))) return false;
+  if (segments.some((s) => s.length === 0)) return false; // empty segment (//, leading /)
+  if (segments.some((s) => s === "..")) return false; // traversal
+
+  const isConfig = segments[0] === CONFIG_DIR;
+  if (isConfig) {
+    if (!filters.syncObsidianConfig) return false;
+    if (!isSyncableConfigPath(path)) return false;
+  } else if (segments.some((s) => s.startsWith("."))) {
+    return false; // any other hidden file/folder
+  }
+
   for (const folder of filters.excludedFolders) {
     const normalized = folder.replace(/^\/+|\/+$/g, "");
     if (normalized && (path === normalized || path.startsWith(normalized + "/"))) return false;
   }
+
+  if (isConfig) return true; // config files sync regardless of extension
   const ext = extensionOf(path);
   if (ext === "md") return true;
   return filters.extensions.includes(ext);

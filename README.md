@@ -38,8 +38,30 @@ encryption. Works on desktop and mobile.
   encrypted; object keys are opaque ids, so the server learns neither your
   note paths nor their contents.
 - **Filtering** — markdown always syncs; images/audio/video/PDF by default;
-  other extensions opt-in; excluded folders; max file size; hidden files never
-  sync.
+  other extensions opt-in; a searchable folder-exclusion list (with an
+  "include subfolders" option and an Apply button); max file size; hidden
+  files never sync.
+- **Optional `.obsidian` config sync** — sync your plugins, themes, snippets
+  and settings across devices. This plugin's own folder and per-device
+  workspace layout are always excluded, so your S3 credentials and passphrase
+  are never uploaded. Off by default; enable it on every device for two-way
+  config sync.
+- **Inbound / outbound indicators** — the status bar and side panel show live
+  `↓ downloaded` / `↑ uploaded` counts during a sync.
+- **Right-sidebar panel** — a cloud icon in the ribbon opens a panel with
+  tabbed action buttons (Sync now, Version history, Resolve, Log, Test,
+  Reset, Settings), a live status tab, and a recent-runs log.
+
+## Install with BRAT
+
+This plugin isn't in the community directory yet. Install it with
+[BRAT](https://github.com/TfTHacker/obsidian42-brat):
+
+1. Install and enable **BRAT** from Community plugins.
+2. BRAT → **Add beta plugin** → enter `https://github.com/goodhobak/obsidian-s3-sync`.
+3. BRAT installs the latest release and enables **S3 Sync**.
+
+To update later: BRAT → **Check for updates**.
 
 ## Quick start with RustFS
 

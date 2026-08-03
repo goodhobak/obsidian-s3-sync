@@ -203,7 +203,7 @@ export class S3SyncView extends ItemView {
     setIcon(this.headlineEl.createSpan({ cls: "s3-sync-panel-headline-icon" }), icon);
     let text: string;
     if (busy && status.plannedOps > 0) {
-      text = `Syncing ${status.completedOps} / ${status.plannedOps} objects`;
+      text = `Syncing ${status.completedOps} / ${status.plannedOps}  (↓${status.inbound} in · ↑${status.outbound} out)`;
     } else if (busy) {
       text = status.message || "Syncing…";
     } else if (status.phase === "error") {

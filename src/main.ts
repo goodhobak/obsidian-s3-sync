@@ -28,6 +28,8 @@ const IDLE_STATUS: SyncStatus = {
   pendingOps: 0,
   completedOps: 0,
   plannedOps: 0,
+  inbound: 0,
+  outbound: 0,
 };
 
 export default class S3SyncPlugin extends Plugin {
@@ -156,7 +158,7 @@ export default class S3SyncPlugin extends Plugin {
   private buildEngine(): { engine: SyncEngine; remote: RemoteStore } {
     const remote = new RemoteStore(this.buildS3(), this.settings);
     const engine = new SyncEngine(
-      new ObsidianVaultFiles(this.app),
+      new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig),
       remote,
       this.indexStore,
       this.settings.filters,
@@ -169,10 +171,12 @@ export default class S3SyncPlugin extends Plugin {
         onProgress: (p) =>
           this.setStatus({
             ...this.status,
-            phase: "pushing",
+            phase: p.inbound > p.outbound ? "pulling" : "pushing",
             message: p.message,
             completedOps: p.completed,
             plannedOps: p.total,
+            inbound: p.inbound,
+            outbound: p.outbound,
           }),
       },
     );
@@ -266,7 +270,15 @@ export default class S3SyncPlugin extends Plugin {
       return;
     }
     this.syncing = true;
-    this.setStatus({ ...this.status, phase: "scanning", message: "Starting sync", completedOps: 0, plannedOps: 0 });
+    this.setStatus({
+      ...this.status,
+      phase: "scanning",
+      message: "Starting sync",
+      completedOps: 0,
+      plannedOps: 0,
+      inbound: 0,
+      outbound: 0,
+    });
     try {
       const { engine, remote } = this.buildEngine();
       await remote.initialize();
@@ -363,7 +375,7 @@ export default class S3SyncPlugin extends Plugin {
       new Notice("S3 Sync: nothing to resolve");
       return;
     }
-    const files = new ObsidianVaultFiles(this.app);
+    const files = new ObsidianVaultFiles(this.app, () => this.settings.filters.syncObsidianConfig);
     const decoder = new TextDecoder();
     new ResolveModal(this.app, conflicts, failures, {
       readTextFile: async (path) => {

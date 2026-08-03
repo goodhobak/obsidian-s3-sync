@@ -278,6 +278,33 @@ describe("SyncEngine", () => {
     expect(a.vault.read("s.md")).toBe("b-version");
   });
 
+  it("reports inbound (pull) and outbound (push) direction counts", async () => {
+    // Seed remote with two files another device can pull.
+    a.vault.write("remote1.md", "r1");
+    a.vault.write("remote2.md", "r2");
+    await sync(a);
+
+    // b has one local file to push and two to pull => outbound 1, inbound 2.
+    b.vault.write("local1.md", "l1");
+    const io: Array<{ inbound: number; outbound: number }> = [];
+    const engine = new SyncEngine(
+      b.vault,
+      b.remote,
+      new InMemoryIndexStore(),
+      filters,
+      { versionsToKeep: 5, massDeleteThreshold: 0.5 },
+      { confirmMassDelete: async () => true, onProgress: (p) => io.push({ inbound: p.inbound, outbound: p.outbound }) },
+    );
+    await b.remote.initialize();
+    const res = await engine.syncOnce();
+
+    expect(res.pulled).toBe(2);
+    expect(res.pushed).toBe(1);
+    const last = io[io.length - 1]!;
+    expect(last.inbound).toBe(2);
+    expect(last.outbound).toBe(1);
+  });
+
   it("reports progress with completed/total reaching parity at the end", async () => {
     const s3b = new InMemoryS3();
     const dev = makeDevice(s3b);

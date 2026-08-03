@@ -107,3 +107,43 @@ describe("toggleFolderExclusion", () => {
     expect([...start]).toEqual(["x"]);
   });
 });
+
+describe("isSyncablePath — .obsidian config folder", () => {
+  const off = { ...DEFAULT_SETTINGS.filters, syncObsidianConfig: false };
+  const on = { ...DEFAULT_SETTINGS.filters, syncObsidianConfig: true };
+
+  it("never syncs .obsidian when the option is off (default)", () => {
+    expect(isSyncablePath(".obsidian/appearance.json", off)).toBe(false);
+    expect(isSyncablePath(".obsidian/plugins/dataview/main.js", off)).toBe(false);
+  });
+
+  it("syncs config files (any extension) when the option is on", () => {
+    expect(isSyncablePath(".obsidian/appearance.json", on)).toBe(true);
+    expect(isSyncablePath(".obsidian/plugins/dataview/main.js", on)).toBe(true);
+    expect(isSyncablePath(".obsidian/themes/Things/theme.css", on)).toBe(true);
+    expect(isSyncablePath(".obsidian/snippets/custom.css", on)).toBe(true);
+  });
+
+  it("never syncs this plugin's own folder (secrets + local state)", () => {
+    expect(isSyncablePath(".obsidian/plugins/s3-sync/data.json", on)).toBe(false);
+    expect(isSyncablePath(".obsidian/plugins/s3-sync/sync-index.json", on)).toBe(false);
+    expect(isSyncablePath(".obsidian/plugins/s3-sync/main.js", on)).toBe(false);
+  });
+
+  it("never syncs per-device workspace layout or trash or nested hidden files", () => {
+    expect(isSyncablePath(".obsidian/workspace.json", on)).toBe(false);
+    expect(isSyncablePath(".obsidian/workspace-mobile.json", on)).toBe(false);
+    expect(isSyncablePath(".obsidian/trash/x.md", on)).toBe(false);
+    expect(isSyncablePath(".obsidian/.DS_Store", on)).toBe(false);
+    expect(isSyncablePath(".obsidian/plugins/.git/config", on)).toBe(false);
+  });
+
+  it("still blocks traversal even inside .obsidian", () => {
+    expect(isSyncablePath(".obsidian/../secrets.md", on)).toBe(false);
+  });
+
+  it("other hidden folders never sync regardless of the option", () => {
+    expect(isSyncablePath(".git/config", on)).toBe(false);
+    expect(isSyncablePath(".trash/note.md", on)).toBe(false);
+  });
+});

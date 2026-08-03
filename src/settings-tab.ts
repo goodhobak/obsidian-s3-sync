@@ -161,6 +161,27 @@ export class S3SyncSettingTab extends PluginSettingTab {
         }),
       );
 
+    new Setting(containerEl).setName("App config (.obsidian)").setHeading();
+
+    const configDesc = document.createDocumentFragment();
+    configDesc.append(
+      "Sync the .obsidian folder — plugins, themes, snippets and settings — so your setup follows you across devices. ",
+    );
+    configDesc.createEl("strong", { text: "This plugin's own folder and per-device workspace layout are always excluded" });
+    configDesc.append(
+      ", so your S3 credentials and passphrase are never uploaded. Enable on all devices for two-way config sync.",
+    );
+    new Setting(containerEl)
+      .setName("Sync .obsidian config folder")
+      .setDesc(configDesc)
+      .addToggle((t) =>
+        t.setValue(s.filters.syncObsidianConfig).onChange(async (v) => {
+          s.filters.syncObsidianConfig = v;
+          await this.plugin.saveSettings();
+          void this.refreshStatistics(); // config sync changes the syncable count
+        }),
+      );
+
     new Setting(containerEl).setName("When to sync").setHeading();
 
     new Setting(containerEl)
