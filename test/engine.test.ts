@@ -341,8 +341,8 @@ describe("SyncEngine", () => {
   it("skips a file whose remote blob is corrupted, without writing garbage (sec-M1)", async () => {
     a.vault.write("safe.md", "trustworthy");
     await sync(a);
-    const blobKey = "files/safe.md";
-    s3.corrupt(blobKey);
+    const { manifest } = await a.remote.loadManifest();
+    s3.corrupt(manifest.files["safe.md"]!.blobKey);
 
     const res = await sync(b);
     expect(res.pulled).toBe(0);
@@ -412,26 +412,86 @@ describe("SyncEngine", () => {
     expect(after).toBe(before);
   }, 60_000);
 
-  it("purges tombstones and their history blobs after the TTL (test-reviewer #3)", async () => {
+  it("retains deleted files indefinitely (recoverable, no time-based purge)", async () => {
     let clock = 1_000;
     const dev = makeDevice(s3, { clock: () => clock });
     await dev.remote.initialize();
     dev.vault.write("temp.md", "content");
     await dev.engine.syncOnce();
     dev.vault.remove("temp.md");
-    await dev.engine.syncOnce(); // creates tombstone + history blob
+    await dev.engine.syncOnce(); // tombstone + retained backup
 
     const { manifest: m1 } = await dev.remote.loadManifest();
     expect(m1.files["temp.md"]?.deletedAt).toBeGreaterThan(0);
+    expect(m1.files["temp.md"]?.history?.[0]?.hash).toBeTruthy();
 
-    // Advance past the 30-day TTL and sync again.
-    clock += 31 * 24 * 60 * 60 * 1000;
+    // Advance well past any old TTL — the deleted file must still be there.
+    clock += 400 * 24 * 60 * 60 * 1000;
     dev.vault.write("other.md", "trigger a manifest write");
     await dev.engine.syncOnce();
 
     const { manifest: m2 } = await dev.remote.loadManifest();
-    expect(m2.files["temp.md"]).toBeUndefined();
-    expect(s3.keys().some((k) => k.startsWith("history/"))).toBe(false);
+    expect(m2.files["temp.md"]?.deletedAt).toBeGreaterThan(0); // still recoverable
+    // Its backup blob is still stored.
+    const hash = m2.files["temp.md"]!.history![0]!.hash;
+    expect(s3.keys()).toContain(`blobs/${hash}`);
+  });
+
+  it("keeps 5 backups by default for a deleted file and can restore it", async () => {
+    const dev = makeDevice(s3); // versionsToKeep defaults to 5
+    await dev.remote.initialize();
+    for (let i = 1; i <= 7; i++) {
+      dev.vault.write("d.md", `version ${i}`);
+      await dev.engine.syncOnce();
+    }
+    dev.vault.remove("d.md");
+    await dev.engine.syncOnce();
+
+    const deleted = await dev.engine.listDeleted();
+    expect(deleted.map((f) => f.path)).toContain("d.md");
+    const entry = deleted.find((f) => f.path === "d.md")!;
+    expect(entry.versions.length).toBe(5); // 5 backups retained (v7..v3)
+
+    // Restore brings the newest backup (v7) back; next sync clears the tombstone.
+    expect(await dev.engine.restoreDeleted("d.md")).toBe(true);
+    expect(dev.vault.read("d.md")).toBe("version 7");
+    await dev.engine.syncOnce();
+    const { manifest } = await dev.remote.loadManifest();
+    expect(manifest.files["d.md"]?.deletedAt).toBeUndefined(); // resurrected
+  });
+
+  it("permanently deletes a file only via purge, freeing its blobs", async () => {
+    const dev = makeDevice(s3);
+    await dev.remote.initialize();
+    dev.vault.write("gone.md", "bye");
+    await dev.engine.syncOnce();
+    dev.vault.remove("gone.md");
+    await dev.engine.syncOnce();
+
+    const { manifest: before } = await dev.remote.loadManifest();
+    const hash = before.files["gone.md"]!.history![0]!.hash;
+    expect(s3.keys()).toContain(`blobs/${hash}`);
+
+    const purged = await dev.engine.purgeDeleted(["gone.md"]);
+    expect(purged).toBe(1);
+
+    const { manifest: after } = await dev.remote.loadManifest();
+    expect(after.files["gone.md"]).toBeUndefined();
+    expect(s3.keys()).not.toContain(`blobs/${hash}`); // blob removed only on purge
+  });
+
+  it("stores identical content once, deduplicated across paths", async () => {
+    const dev = makeDevice(s3);
+    await dev.remote.initialize();
+    dev.vault.write("one.md", "identical body");
+    dev.vault.write("two.md", "identical body");
+    dev.vault.write("three.md", "identical body");
+    await dev.engine.syncOnce();
+
+    // Three paths, one stored blob.
+    expect(s3.keys().filter((k) => k.startsWith("blobs/")).length).toBe(1);
+    const { manifest } = await dev.remote.loadManifest();
+    expect(manifest.files["one.md"]!.blobKey).toBe(manifest.files["two.md"]!.blobKey);
   });
 
   it("prunes history beyond versionsToKeep but keeps blobs shared across paths (test-reviewer #4)", async () => {
@@ -458,9 +518,9 @@ describe("SyncEngine", () => {
 
     const { manifest } = await dev.remote.loadManifest();
     expect((manifest.files["p.md"]?.history?.length ?? 0)).toBeLessThanOrEqual(2);
-    // q's history still references the shared-v0 hash, so its blob must survive.
+    // q's history still references the shared-v0 hash, so its content-addressed blob must survive.
     const qSharedHash = manifest.files["q.md"]?.history?.[0]?.hash;
-    if (qSharedHash) expect(s3.keys()).toContain(`history/${qSharedHash}`);
+    if (qSharedHash) expect(s3.keys()).toContain(`blobs/${qSharedHash}`);
   });
 
   it("does not delete a file that a same-cycle pull rewrote under a different case (quality-H2)", async () => {

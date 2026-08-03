@@ -25,8 +25,24 @@ describe("RemoteStore blob integrity", () => {
     await store.initialize();
     const data = enc("hello");
     const hash = await sha256Hex(data);
-    await store.uploadBlob("files/a.md", data, hash);
-    expect(dec((await store.downloadBlob("files/a.md", hash))!)).toBe("hello");
+    const { blobKey, uploaded } = await store.uploadBlob(hash, data);
+    expect(uploaded).toBe(true);
+    expect(dec((await store.downloadBlob(blobKey, hash))!)).toBe("hello");
+  });
+
+  it("deduplicates identical content (second upload is skipped)", async () => {
+    const s3 = new InMemoryS3();
+    const store = plainStore(s3);
+    await store.initialize();
+    const data = enc("dup");
+    const hash = await sha256Hex(data);
+    const first = await store.uploadBlob(hash, data);
+    const second = await store.uploadBlob(hash, data);
+    expect(first.uploaded).toBe(true);
+    expect(second.uploaded).toBe(false); // deduped
+    expect(second.blobKey).toBe(first.blobKey);
+    // Exactly one blob object stored.
+    expect(s3.keys().filter((k) => k.startsWith("blobs/")).length).toBe(1);
   });
 
   it("rejects a tampered blob (plaintext) via sha256 mismatch", async () => {
@@ -35,9 +51,9 @@ describe("RemoteStore blob integrity", () => {
     await store.initialize();
     const data = enc("hello");
     const hash = await sha256Hex(data);
-    await store.uploadBlob("files/a.md", data, hash);
-    s3.corrupt("files/a.md");
-    await expect(store.downloadBlob("files/a.md", hash)).rejects.toBeInstanceOf(BlobIntegrityError);
+    const { blobKey } = await store.uploadBlob(hash, data);
+    s3.corrupt(blobKey);
+    await expect(store.downloadBlob(blobKey, hash)).rejects.toBeInstanceOf(BlobIntegrityError);
   });
 
   it("defeats a blob-swap in encrypted mode (AAD + hash bind content)", async () => {
@@ -48,16 +64,26 @@ describe("RemoteStore blob integrity", () => {
     const bData = enc("content of B");
     const aHash = await sha256Hex(aData);
     const bHash = await sha256Hex(bData);
-    await store.uploadBlob("blobs/aaa", aData, aHash);
-    await store.uploadBlob("blobs/bbb", bData, bHash);
+    const a = await store.uploadBlob(aHash, aData);
+    const b = await store.uploadBlob(bHash, bData);
 
     // Attacker serves B's ciphertext where A's key was requested.
-    const swapped = s3.objects.get("blobs/bbb")!;
-    s3.objects.set("blobs/aaa", { body: swapped.body.slice(0), etag: swapped.etag });
+    const swapped = s3.objects.get(b.blobKey)!;
+    s3.objects.set(a.blobKey, { body: swapped.body.slice(0), etag: swapped.etag });
 
     // Decryption with A's AAD (blob:aHash) fails authentication, OR the bytes
     // fail the hash check — either way, no silent swap.
-    await expect(store.downloadBlob("blobs/aaa", aHash)).rejects.toThrow();
+    await expect(store.downloadBlob(a.blobKey, aHash)).rejects.toThrow();
+  });
+
+  it("uses opaque (non-plaintext-hash) storage keys in encrypted mode", async () => {
+    const s3 = new InMemoryS3();
+    const store = encStore(s3);
+    await store.initialize();
+    const data = enc("secret content");
+    const hash = await sha256Hex(data);
+    const { blobKey } = await store.uploadBlob(hash, data);
+    expect(blobKey).not.toContain(hash); // server never sees the plaintext hash
   });
 
   it("returns null for a missing blob", async () => {

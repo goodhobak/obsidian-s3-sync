@@ -125,6 +125,12 @@ export class S3SyncView extends ItemView {
         run: () => this.plugin.openResolveLatest(),
       },
       {
+        label: "Deleted files",
+        icon: "trash-2",
+        description: "Restore deleted files from backups, or permanently delete.",
+        run: () => this.plugin.openDeletedFiles(),
+      },
+      {
         label: "Show sync log",
         icon: "scroll-text",
         description: "History of every sync run.",

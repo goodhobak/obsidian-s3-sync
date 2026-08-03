@@ -12,12 +12,19 @@ import {
 import { conflictCopyPath, extensionOf, isSyncablePath } from "./filters";
 import { mergeThreeWay } from "./merge";
 import { ManifestConflictError, RemoteStore } from "./remote-store";
+import type { HistoryVersion } from "../types";
 import type { IndexStore, LocalFileStat, VaultFiles } from "./vault-files";
 
-const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_MANIFEST_RETRIES = 3;
 /** Below this many deletions the mass-delete guard stays quiet. */
 const MASS_DELETE_MIN_COUNT = 5;
+
+/** A deleted (tombstoned) file with its retained recoverable backups. */
+export interface DeletedFile {
+  path: string;
+  deletedAt: number;
+  versions: HistoryVersion[];
+}
 
 export interface SyncSummary {
   pushed: number;
@@ -330,14 +337,17 @@ export class SyncEngine {
       // Contents may have changed since scan; hash what we actually upload.
       const hash = await sha256Hex(content);
       const prev = manifest.files[push.path] ?? null;
-      const blobKey = this.remote.newBlobKey(push.path);
 
-      if (prev && !prev.deletedAt && prev.hash !== hash && this.options.versionsToKeep > 0) {
-        await this.captureHistory(push.path, prev, historyDeleteCandidates);
+      // Retain the superseded version as a backup (up to versionsToKeep), or
+      // mark its content for possible cleanup when history is disabled.
+      if (prev && !prev.deletedAt && prev.hash !== hash) {
+        if (this.options.versionsToKeep > 0) this.captureHistory(push.path, prev, historyDeleteCandidates);
+        else historyDeleteCandidates.add(prev.hash);
       }
-      await this.remote.uploadBlob(blobKey, content, hash);
-      uploadedThisAttempt.push(blobKey);
-      if (prev && prev.blobKey !== blobKey) blobsToDeleteAfterSave.push(prev.blobKey);
+
+      // Content-addressed upload: identical content is never stored twice.
+      const { blobKey, uploaded } = await this.remote.uploadBlob(hash, content);
+      if (uploaded) uploadedThisAttempt.push(blobKey);
 
       const entry: ManifestEntry = {
         hash,
@@ -356,6 +366,9 @@ export class SyncEngine {
     }
 
     // ---- deletion propagation (local -> remote tombstones) ------------------
+    // A deleted file keeps up to versionsToKeep recoverable backups indefinitely
+    // (its content-addressed blobs are retained); the blobs are removed only when
+    // the file is permanently deleted or a backup is pruned and unreferenced.
     for (const path of tombstonePushes) {
       const prev = manifest.files[path];
       if (!prev || prev.deletedAt) {
@@ -363,11 +376,10 @@ export class SyncEngine {
         continue;
       }
       this.progress(`Propagating deletion of ${path}`);
-      if (this.options.versionsToKeep > 0) {
-        await this.captureHistory(path, prev, historyDeleteCandidates);
-      }
-      manifest.files[path] = { ...prev, rev: prev.rev + 1, deletedAt: this.now(), blobKey: "" };
-      blobsToDeleteAfterSave.push(prev.blobKey);
+      if (this.options.versionsToKeep > 0) this.captureHistory(path, prev, historyDeleteCandidates);
+      else historyDeleteCandidates.add(prev.hash);
+      const kept = manifest.files[path]!; // captureHistory mutated prev.history in place
+      manifest.files[path] = { ...kept, rev: kept.rev + 1, deletedAt: this.now(), blobKey: "" };
       delete index.files[path];
       manifestDirty = true;
       summary.deletedRemote++;
@@ -395,18 +407,11 @@ export class SyncEngine {
 
     for (const path of dropFromIndex) delete index.files[path];
 
-    // ---- tombstone GC -------------------------------------------------------
-    const cutoff = this.now() - TOMBSTONE_TTL_MS;
-    for (const [path, entry] of Object.entries(manifest.files)) {
-      if (entry.deletedAt && entry.deletedAt < cutoff) {
-        for (const version of entry.history ?? []) historyDeleteCandidates.add(version.hash);
-        delete manifest.files[path];
-        manifestDirty = true;
-      }
-    }
-
-    // Decide history-blob deletions in one pass over the finalized manifest.
-    this.resolveHistoryDeletions(manifest, historyDeleteCandidates, blobsToDeleteAfterSave);
+    // Tombstones and their backups are kept indefinitely so deleted files stay
+    // recoverable; there is no time-based purge. Blobs are removed only when a
+    // version is pruned beyond versionsToKeep (or a file is permanently deleted)
+    // AND no live entry or retained backup still references that content.
+    await this.resolveBlobDeletions(manifest, historyDeleteCandidates, blobsToDeleteAfterSave);
 
     // ---- persist ------------------------------------------------------------
     if (manifestDirty) {
@@ -478,7 +483,7 @@ export class SyncEngine {
 
     const base = index.files[path] ?? null;
     if (localContent && base && extensionOf(path) === "md") {
-      const baseContent = await this.remote.downloadHistoryBlob(base.hash);
+      const baseContent = await this.remote.downloadByHash(base.hash);
       if (baseContent) {
         const decoder = new TextDecoder();
         const result = mergeThreeWay(
@@ -527,23 +532,13 @@ export class SyncEngine {
   }
 
   /**
-   * Snapshot the previous version into content-addressed history and prune to
-   * versionsToKeep. Pruned hashes are recorded as deletion *candidates*; whether
-   * their blobs can actually be deleted is decided in one final pass over the
-   * finalized manifest (see resolveHistoryDeletions) so shared content-addressed
-   * blobs are never removed while still referenced. This keeps the whole sync
-   * O(N) instead of O(N^2).
+   * Record the previous version as a backup (its content-addressed blob already
+   * exists — no copy needed) and prune the backup list to versionsToKeep. Pruned
+   * hashes are deletion *candidates*; whether their blobs can actually be removed
+   * is decided by resolveBlobDeletions over the finalized manifest, so content
+   * shared by another path or backup is never deleted.
    */
-  private async captureHistory(
-    path: string,
-    prev: ManifestEntry,
-    historyDeleteCandidates: Set<string>,
-  ): Promise<void> {
-    try {
-      await this.remote.snapshotToHistory(prev.blobKey, prev.hash);
-    } catch {
-      return; // history is best-effort; sync must not fail because a snapshot did
-    }
+  private captureHistory(path: string, prev: ManifestEntry, historyDeleteCandidates: Set<string>): void {
     const history = [{ hash: prev.hash, size: prev.size, ts: this.now() }, ...(prev.history ?? [])];
     while (history.length > this.options.versionsToKeep) {
       const dropped = history.pop();
@@ -553,39 +548,106 @@ export class SyncEngine {
   }
 
   /**
-   * Given the finalized manifest, decide which candidate history hashes are now
-   * unreferenced and queue their blobs for deletion. Single O(N) scan.
+   * Delete candidate blobs whose content is no longer referenced by any live
+   * entry or retained backup in the finalized manifest. Single O(N) scan; keys
+   * are content-addressed so this is the only place blobs are removed.
    */
-  private resolveHistoryDeletions(
+  private async resolveBlobDeletions(
     manifest: RemoteManifest,
     candidates: Set<string>,
     blobsToDeleteAfterSave: string[],
-  ): void {
+  ): Promise<void> {
     if (candidates.size === 0) return;
     const referenced = new Set<string>();
     for (const entry of Object.values(manifest.files)) {
-      for (const version of entry.history ?? []) referenced.add(version.hash);
+      if (!entry.deletedAt) referenced.add(entry.hash); // live content
+      for (const version of entry.history ?? []) referenced.add(version.hash); // retained backups
     }
     for (const hash of candidates) {
-      if (!referenced.has(hash)) blobsToDeleteAfterSave.push(this.remote.historyBlobKey(hash));
+      if (!referenced.has(hash)) blobsToDeleteAfterSave.push(await this.remote.blobKeyForHash(hash));
     }
   }
 
   /** Restore a historical version into the vault; the next sync pushes it as the newest revision. */
   async restoreVersion(path: string, hash: string): Promise<boolean> {
-    const content = await this.remote.downloadHistoryBlob(hash);
+    const content = await this.remote.downloadByHash(hash);
     if (!content) return false;
     await this.files.writeBinary(path, content);
     return true;
   }
 
-  /** Fetch (decrypt + verify) a historical version's content for preview/diff. */
+  /** Fetch (decrypt + verify) a version's content by hash for preview/diff. */
   async getHistoryContent(hash: string): Promise<ArrayBuffer | null> {
-    return this.remote.downloadHistoryBlob(hash);
+    return this.remote.downloadByHash(hash);
   }
 
   /** Fetch (decrypt + verify) the current remote version's content for preview/diff. */
   async getLiveContent(blobKey: string, hash: string): Promise<ArrayBuffer | null> {
     return this.remote.downloadBlob(blobKey, hash);
+  }
+
+  /** Tombstoned entries with retained backups, for the deleted-files view. */
+  async listDeleted(): Promise<DeletedFile[]> {
+    const { manifest } = await this.remote.loadManifest();
+    const out: DeletedFile[] = [];
+    for (const [path, entry] of Object.entries(manifest.files)) {
+      if (!entry.deletedAt) continue;
+      out.push({ path, deletedAt: entry.deletedAt, versions: entry.history ?? [] });
+    }
+    return out.sort((a, b) => b.deletedAt - a.deletedAt);
+  }
+
+  /**
+   * Restore a deleted file's newest backup into the vault. The next sync pushes
+   * it, which clears the tombstone (edit-wins-over-delete).
+   */
+  async restoreDeleted(path: string): Promise<boolean> {
+    const { manifest } = await this.remote.loadManifest();
+    const entry = manifest.files[path];
+    const newest = entry?.history?.[0];
+    if (!newest) return false;
+    return this.restoreVersion(path, newest.hash);
+  }
+
+  /**
+   * Permanently delete a tombstoned file: drop its manifest entry and remove any
+   * blobs no longer referenced elsewhere. This is the only path that discards a
+   * deleted file's backups.
+   */
+  async purgeDeleted(paths: string[]): Promise<number> {
+    let purged = 0;
+    for (let attempt = 0; attempt < MAX_MANIFEST_RETRIES; attempt++) {
+      const { manifest, etag } = await this.remote.loadManifest();
+      const candidates = new Set<string>();
+      purged = 0;
+      for (const path of paths) {
+        const entry = manifest.files[path];
+        if (!entry || !entry.deletedAt) continue;
+        for (const v of entry.history ?? []) candidates.add(v.hash);
+        candidates.add(entry.hash);
+        delete manifest.files[path];
+        purged++;
+      }
+      if (purged === 0) return 0;
+      const blobsToDelete: string[] = [];
+      await this.resolveBlobDeletions(manifest, candidates, blobsToDelete);
+      manifest.revision += 1;
+      manifest.updatedAt = this.now();
+      try {
+        await this.remote.saveManifest(manifest, etag);
+      } catch (err) {
+        if (err instanceof ManifestConflictError) continue; // retry on a fresh view
+        throw err;
+      }
+      for (const key of blobsToDelete) {
+        try {
+          await this.remote.deleteBlob(key);
+        } catch {
+          // best-effort; a leaked blob is harmless
+        }
+      }
+      return purged;
+    }
+    throw new ManifestConflictError();
   }
 }

@@ -72,11 +72,32 @@ async function deriveAesKey(masterKey: CryptoKey, purpose: string): Promise<Cryp
   );
 }
 
+async function deriveHmacKey(masterKey: CryptoKey, purpose: string): Promise<CryptoKey> {
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: new ArrayBuffer(0), info: toArrayBuffer(encoder.encode(`s3-sync/v1/${purpose}`)) },
+    masterKey,
+    { name: "HMAC", hash: "SHA-256", length: 256 },
+    false,
+    ["sign"],
+  );
+}
+
 export class VaultCipher {
   private constructor(
     private readonly blobKey: CryptoKey,
     private readonly metaKey: CryptoKey,
+    private readonly idKey: CryptoKey,
   ) {}
+
+  /**
+   * Deterministic per-vault storage id for a content hash. Keyed HMAC so
+   * identical content dedupes to one object without exposing the plaintext
+   * SHA-256 to the server (which could otherwise confirm known files).
+   */
+  async storageId(hash: string): Promise<string> {
+    const sig = await crypto.subtle.sign("HMAC", this.idKey, encoder.encode(hash));
+    return toHexLocal(new Uint8Array(sig).slice(0, 16));
+  }
 
   /** Create keys for a brand-new encrypted vault; returns the meta to upload. */
   static async initialize(passphrase: string): Promise<{ cipher: VaultCipher; meta: VaultCryptoMeta }> {
@@ -110,7 +131,11 @@ export class VaultCipher {
 
   private static async derive(passphrase: string, salt: Uint8Array): Promise<VaultCipher> {
     const master = await deriveMasterKey(passphrase, salt);
-    return new VaultCipher(await deriveAesKey(master, "blob"), await deriveAesKey(master, "meta"));
+    return new VaultCipher(
+      await deriveAesKey(master, "blob"),
+      await deriveAesKey(master, "meta"),
+      await deriveHmacKey(master, "id"),
+    );
   }
 
   /**
@@ -169,10 +194,13 @@ export class WrongPassphraseError extends Error {
   }
 }
 
-/** Random opaque blob id for encrypted mode so object keys leak no file paths. */
-export function randomBlobId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
+function toHexLocal(bytes: Uint8Array): string {
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
+}
+
+/** Random opaque blob id for encrypted mode so object keys leak no file paths. */
+export function randomBlobId(): string {
+  return toHexLocal(crypto.getRandomValues(new Uint8Array(16)));
 }

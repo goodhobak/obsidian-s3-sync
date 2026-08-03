@@ -26,6 +26,11 @@ export class InMemoryS3 implements S3Api {
     return obj ? { body: obj.body.slice(0), etag: obj.etag } : null;
   }
 
+  async headObject(key: string): Promise<{ etag: string | null; size: number } | null> {
+    const obj = this.objects.get(key);
+    return obj ? { etag: obj.etag, size: obj.body.byteLength } : null;
+  }
+
   async deleteObject(key: string): Promise<void> {
     this.objects.delete(key);
   }

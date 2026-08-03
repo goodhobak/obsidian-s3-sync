@@ -1,5 +1,5 @@
 import { S3Error, type GetResult, type PutOptions } from "../s3/client";
-import { VaultCipher, WrongPassphraseError, randomBlobId, type VaultCryptoMeta } from "../crypto/encryption";
+import { VaultCipher, WrongPassphraseError, type VaultCryptoMeta } from "../crypto/encryption";
 import { sha256Hex } from "../s3/sigv4";
 import { emptyManifest, type RemoteManifest } from "../types";
 
@@ -51,6 +51,7 @@ export interface LoadedManifest {
 export interface S3Api {
   putObject(relativeKey: string, body: ArrayBuffer, opts?: PutOptions): Promise<{ etag: string | null }>;
   getObject(relativeKey: string): Promise<GetResult | null>;
+  headObject(relativeKey: string): Promise<{ etag: string | null; size: number } | null>;
   deleteObject(relativeKey: string): Promise<void>;
   copyObject(fromRelativeKey: string, toRelativeKey: string): Promise<void>;
 }
@@ -142,24 +143,30 @@ export class RemoteStore {
     }
   }
 
-  /** Blob key for a new live version of a vault path. */
-  newBlobKey(path: string): string {
-    return this.encrypted ? `blobs/${randomBlobId()}` : `files/${path}`;
-  }
-
-  historyBlobKey(hash: string): string {
-    return `history/${hash}`;
+  /**
+   * Content-addressed storage key for a plaintext hash. Identical content maps
+   * to one object, so it is never stored twice — across paths, across a file's
+   * own history, or across devices. In encrypted mode the key is a keyed HMAC
+   * of the hash so the server cannot learn the plaintext SHA-256.
+   */
+  async blobKeyForHash(hash: string): Promise<string> {
+    if (this.cipher) return `blobs/${await this.cipher.storageId(hash)}`;
+    return `blobs/${hash}`;
   }
 
   /**
-   * @param hash SHA-256 (hex) of the plaintext. Bound as AES-GCM AAD so a blob
-   * cannot be replayed as different content, and used to verify integrity on
-   * download. The hash is content-identity, so it stays valid across the
-   * server-side copy that produces history blobs.
+   * Upload content addressed by its hash, deduplicating: if an object already
+   * exists at the content-addressed key, the upload is skipped. Returns the key
+   * (which the manifest entry stores) and whether bytes were actually uploaded.
+   *
+   * @param hash SHA-256 (hex) of the plaintext, bound as AES-GCM AAD.
    */
-  async uploadBlob(blobKey: string, plaintext: ArrayBuffer, hash: string): Promise<void> {
+  async uploadBlob(hash: string, plaintext: ArrayBuffer): Promise<{ blobKey: string; uploaded: boolean }> {
+    const blobKey = await this.blobKeyForHash(hash);
+    if (await this.s3.headObject(blobKey)) return { blobKey, uploaded: false }; // dedup: already stored
     const body = this.cipher ? await this.cipher.encrypt(plaintext, "blob", `blob:${hash}`) : plaintext;
     await this.s3.putObject(blobKey, body);
+    return { blobKey, uploaded: true };
   }
 
   /**
@@ -180,16 +187,14 @@ export class RemoteStore {
     await this.s3.deleteObject(blobKey);
   }
 
-  /** Server-side snapshot of the current live blob into content-addressed history. */
-  async snapshotToHistory(liveBlobKey: string, hash: string): Promise<void> {
-    await this.s3.copyObject(liveBlobKey, this.historyBlobKey(hash));
-  }
-
-  async downloadHistoryBlob(hash: string): Promise<ArrayBuffer | null> {
-    return this.downloadBlob(this.historyBlobKey(hash), hash);
-  }
-
-  async deleteHistoryBlob(hash: string): Promise<void> {
-    await this.s3.deleteObject(this.historyBlobKey(hash));
+  /**
+   * Fetch a version's content by hash from the content-addressed store, with a
+   * fallback to the legacy `history/{hash}` layout so pre-dedup blobs remain
+   * restorable.
+   */
+  async downloadByHash(hash: string): Promise<ArrayBuffer | null> {
+    const found = await this.downloadBlob(await this.blobKeyForHash(hash), hash);
+    if (found) return found;
+    return this.downloadBlob(`history/${hash}`, hash); // legacy layout
   }
 }

@@ -8,6 +8,7 @@ import { S3SyncSettingTab } from "./settings-tab";
 import { MassDeleteConfirmModal, VersionHistoryModal } from "./ui/modals";
 import { ResolveModal } from "./ui/resolve-modal";
 import { SyncLogModal } from "./ui/sync-log-modal";
+import { DeletedFilesModal } from "./ui/deleted-files-modal";
 import { S3SyncView, S3_SYNC_VIEW_TYPE } from "./ui/side-panel";
 import { StatusBarController } from "./ui/status-bar";
 import { isSyncablePath } from "./sync/filters";
@@ -92,6 +93,12 @@ export default class S3SyncPlugin extends Plugin {
       id: "resolve-issues",
       name: "Resolve conflicts and errors",
       callback: () => void this.openResolve(this.lastConflicts, this.lastFailures),
+    });
+
+    this.addCommand({
+      id: "deleted-files",
+      name: "Deleted files (restore or permanently delete)",
+      callback: () => void this.openDeletedFiles(),
     });
 
     this.addCommand({
@@ -365,6 +372,35 @@ export default class S3SyncPlugin extends Plugin {
     new SyncLogModal(this.app, entries, {
       resolveEntry: (entry) => void this.openResolve(entry.conflictCopies, entry.failedFiles),
       clearLog: () => this.logStore.clear(),
+    }).open();
+  }
+
+  // ---- deleted files (restore / permanently delete) -------------------------
+
+  async openDeletedFiles(): Promise<void> {
+    if (!this.isConfigured()) {
+      new Notice("S3 Sync: configure endpoint, bucket and credentials first");
+      return;
+    }
+    const { engine, remote } = this.buildEngine();
+    try {
+      await remote.initialize();
+    } catch (err) {
+      new Notice(`S3 Sync: ${err instanceof Error ? err.message : String(err)}`, 8000);
+      return;
+    }
+    new DeletedFilesModal(this.app, {
+      list: () => engine.listDeleted(),
+      restore: async (path) => {
+        if (this.syncing) {
+          new Notice("S3 Sync: a sync is in progress — try again in a moment");
+          return false;
+        }
+        const ok = await engine.restoreDeleted(path);
+        if (ok) void this.syncNow("auto");
+        return ok;
+      },
+      purge: (paths) => engine.purgeDeleted(paths),
     }).open();
   }
 

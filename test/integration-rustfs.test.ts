@@ -127,6 +127,34 @@ describe.runIf(enabled)("RustFS integration", () => {
     await expect(loser.remote.saveManifest(manifest, staleEtag)).rejects.toBeInstanceOf(ManifestConflictError);
   });
 
+  it("deduplicates identical content and retains + purges deleted files (real server)", async () => {
+    const prefix = `${runId}/dedup`;
+    const a = makeDevice(prefix);
+    await a.remote.initialize();
+
+    // Three identical files -> exactly one stored blob (dedup verified on RustFS).
+    a.vault.write("x.md", "same bytes");
+    a.vault.write("y.md", "same bytes");
+    a.vault.write("z.md", "same bytes");
+    await a.engine.syncOnce();
+    const blobs = (await a.s3.listObjects("blobs/")).length;
+    expect(blobs).toBe(1);
+
+    // Delete one path: content still referenced by the others, so no blob removed.
+    a.vault.remove("x.md");
+    await a.engine.syncOnce();
+    expect((await a.s3.listObjects("blobs/")).length).toBe(1);
+    const deleted = await a.engine.listDeleted();
+    expect(deleted.map((f) => f.path)).toContain("x.md");
+
+    // Delete the remaining two, then permanently delete all three -> blob freed.
+    a.vault.remove("y.md");
+    a.vault.remove("z.md");
+    await a.engine.syncOnce();
+    await a.engine.purgeDeleted(["x.md", "y.md", "z.md"]);
+    expect((await a.s3.listObjects("blobs/")).length).toBe(0);
+  });
+
   it("keeps restorable version history on the server", async () => {
     const prefix = `${runId}/hist`;
     const a = makeDevice(prefix);

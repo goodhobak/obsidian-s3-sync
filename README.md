@@ -22,6 +22,16 @@ encryption. Works on desktop and mobile.
 - **Deletion safety** — deletions propagate via tombstones (30-day TTL), local
   deletions go to the trash per your Obsidian preference, and a mass-delete
   guard asks before a sync removes a large share of the vault.
+- **Deduplicated storage** — every blob is content-addressed, so identical
+  content is stored exactly once: across different paths, across a file's own
+  history, and across devices (a re-upload of existing content is skipped). In
+  encrypted mode the storage key is a keyed HMAC of the content hash, so the
+  server never learns the plaintext hash.
+- **Recoverable deletes** — deleting a file keeps up to N backups (default 5)
+  and a tombstone **indefinitely**; nothing is purged on a timer. **Deleted
+  files** (command or panel button) lists them to **restore** or **permanently
+  delete**. A blob is only removed when it's permanently deleted or pruned
+  beyond the backup count *and* no other path/version still references it.
 - **Version history** — old versions are kept server-side (content-addressed,
   pruned to N per file). Right-click any file → **S3 Sync: version history** to
   see every stored version, **compare** a diff against the current file, and
@@ -86,10 +96,15 @@ To update later: BRAT → **Check for updates**.
 <prefix>/
   meta/vault.json        # plaintext marker: encrypted? KDF params, key-check
   meta/manifest.json     # (or manifest.enc) file index, ETag-locked
-  files/<path>           # plaintext mode: live blobs mirror vault paths
-  blobs/<random-id>      # encrypted mode: opaque live blobs
-  history/<sha256>       # content-addressed old versions
+  blobs/<id>             # content-addressed store, deduplicated.
+                         #   plaintext mode: <id> = sha256(content)
+                         #   encrypted mode: <id> = HMAC(content hash) (opaque)
+                         # live versions, history, and every path share this
+                         # one store; a blob is deleted only when unreferenced.
 ```
+
+Legacy `files/<path>` and `history/<sha256>` objects from older versions remain
+readable; new writes are content-addressed under `blobs/`.
 
 ## Development
 

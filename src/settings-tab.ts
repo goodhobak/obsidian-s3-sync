@@ -231,8 +231,11 @@ export class S3SyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Versions to keep per file")
-      .setDesc("Old versions stay restorable from the version history. 0 disables history.")
+      .setName("Backups to keep per file")
+      .setDesc(
+        "Old versions stay restorable from the version history. Deleted files keep this many backups " +
+          "and are retained until permanently deleted (see the Deleted files view). 0 disables backups.",
+      )
       .addText((t) =>
         t.setValue(String(s.versionsToKeep)).onChange(async (v) => {
           const n = parseInt(v, 10);
