@@ -1,0 +1,20 @@
+.s3-sync-status-bar {
+  cursor: pointer;
+}
+
+.s3-sync-status-error {
+  color: var(--text-error);
+}
+
+.s3-sync-version-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.s3-sync-version-item .s3-sync-version-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}

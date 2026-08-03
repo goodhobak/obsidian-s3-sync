@@ -1,0 +1,25 @@
+{
+  "name": "obsidian-s3-sync",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Sync your Obsidian vault with any S3-compatible storage (RustFS, MinIO, AWS S3, R2) — optional end-to-end encryption, no sync server required.",
+  "main": "main.js",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "test": "vitest run --config vitest.config.mts",
+    "test:watch": "vitest --config vitest.config.mts",
+    "integration": "RUSTFS_INTEGRATION=1 vitest run --config vitest.config.mts test/integration-rustfs.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "^1.11.4",
+    "tslib": "^2.8.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.4"
+  }
+}
