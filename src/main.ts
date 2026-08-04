@@ -181,11 +181,12 @@ export default class S3SyncPlugin extends Plugin {
     return new S3Client(new ObsidianHttpClient(requestUrl), this.settings.connection);
   }
 
-  /** Default max file size applied on mobile when the user has set none (0), to
-   * avoid loading a very large file into memory and OOM-crashing the app. */
-  static readonly MOBILE_DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024;
+  /** Default max file size applied on mobile/tablet when the user has set none
+   * (0). A generous 1 GB default keeps large media syncing while still guarding
+   * against an unbounded download; the user can raise, lower, or clear it. */
+  static readonly MOBILE_DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024;
 
-  /** Filters with a mobile safety cap applied when no explicit limit is set. */
+  /** Filters with the mobile/tablet default applied when no explicit limit is set. */
   effectiveFilters(): typeof this.settings.filters {
     const f = { ...this.settings.filters };
     if (Platform.isMobile && f.maxFileSize === 0) {
