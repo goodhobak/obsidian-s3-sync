@@ -13,6 +13,7 @@ import { MigrateModal } from "./ui/migrate-modal";
 import { S3SyncView, S3_SYNC_VIEW_TYPE } from "./ui/side-panel";
 import { StatusBarController } from "./ui/status-bar";
 import { isSyncablePath } from "./sync/filters";
+import { classifyOverview, type OverviewData } from "./sync/overview";
 import {
   DEFAULT_SETTINGS,
   type ConflictCopyRecord,
@@ -312,6 +313,44 @@ export default class S3SyncPlugin extends Plugin {
       lastSyncAt: this.status.lastSyncAt,
       lastSummary: this.status.message,
     };
+  }
+
+  /**
+   * Compare local files, the sync index, and the remote manifest to classify
+   * every file (synced / modified / failed / remote-only / local-only) for the
+   * overview tab. Fetches the remote manifest (one request).
+   */
+  async computeOverview(): Promise<{ data: OverviewData; lastSyncAt: number | null }> {
+    const filters = this.effectiveFilters();
+
+    // Local files as the engine sees them (includes .obsidian config when on).
+    const files = new ObsidianVaultFiles(
+      this.app,
+      () => filters.syncObsidianConfig,
+      Platform.isWin || Platform.isMobile,
+    );
+    const local = new Map<string, { mtime: number; size: number }>();
+    for (const f of await files.listFiles()) {
+      if (!isSyncablePath(f.path, filters)) continue;
+      if (filters.maxFileSize > 0 && f.size > filters.maxFileSize) continue;
+      local.set(f.path, { mtime: f.mtime, size: f.size });
+    }
+
+    const indexData = await this.indexStore.load();
+    const indexed = new Map<string, { mtime: number; size: number }>();
+    if (indexData) {
+      for (const [p, e] of Object.entries(indexData.files)) indexed.set(p, { mtime: e.mtime, size: e.size });
+    }
+
+    const { remote } = this.buildEngine();
+    await remote.initialize();
+    const { manifest } = await remote.loadManifest();
+    const remoteLive = new Set<string>();
+    for (const [p, e] of Object.entries(manifest.files)) if (!e.deletedAt) remoteLive.add(p);
+
+    const failures = new Map(this.lastFailures.map((f) => [f.path, f.reason]));
+
+    return { data: classifyOverview({ local, indexed, remoteLive, failures }), lastSyncAt: this.status.lastSyncAt };
   }
 
   async syncNow(trigger: "manual" | "auto" | "interval" | "startup"): Promise<void> {

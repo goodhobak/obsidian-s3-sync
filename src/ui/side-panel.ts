@@ -1,10 +1,21 @@
-import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type S3SyncPlugin from "../main";
 import type { SyncLogEntry, SyncStatus } from "../types";
+import type { FileSyncStatus, OverviewData, OverviewRow } from "../sync/overview";
 
 export const S3_SYNC_VIEW_TYPE = "s3-sync-panel";
 
-type TabId = "actions" | "status" | "log";
+type TabId = "actions" | "status" | "log" | "overview";
+
+const STATUS_META: Record<FileSyncStatus, { label: string; icon: string; hint: string }> = {
+  synced: { label: "Synced", icon: "check-circle", hint: "Synced with the server" },
+  modified: { label: "Modified", icon: "pencil", hint: "Changed locally — uploads on next sync" },
+  failed: { label: "Failed", icon: "alert-circle", hint: "Sync error — click to resolve" },
+  remoteOnly: { label: "Server only", icon: "cloud-download", hint: "On the server, not downloaded yet" },
+  localOnly: { label: "Local only", icon: "cloud-upload", hint: "Local only — uploads on next sync" },
+};
+const STATUS_ORDER: FileSyncStatus[] = ["failed", "remoteOnly", "localOnly", "modified", "synced"];
+const MAX_OVERVIEW_ROWS = 400;
 
 interface ActionButton {
   label: string;
@@ -20,6 +31,11 @@ export class S3SyncView extends ItemView {
   private tab: TabId = "actions";
   private bodyEl!: HTMLElement;
   private statusDisposer: (() => void) | null = null;
+  // Overview tab state (survives re-render within a session).
+  private overviewData: OverviewData | null = null;
+  private overviewLastSyncAt: number | null = null;
+  private overviewFilter: FileSyncStatus | "all" = "all";
+  private overviewSearch = "";
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -56,6 +72,7 @@ export class S3SyncView extends ItemView {
     const tabs = root.createDiv({ cls: "s3-sync-panel-tabs" });
     const tabDefs: Array<{ id: TabId; label: string; icon: string }> = [
       { id: "actions", label: "Actions", icon: "zap" },
+      { id: "overview", label: "Overview", icon: "list-tree" },
       { id: "status", label: "Status", icon: "activity" },
       { id: "log", label: "Log", icon: "scroll-text" },
     ];
@@ -90,6 +107,7 @@ export class S3SyncView extends ItemView {
   private async renderBody(): Promise<void> {
     this.bodyEl.empty();
     if (this.tab === "actions") this.renderActions();
+    else if (this.tab === "overview") await this.renderOverview();
     else if (this.tab === "status") await this.renderStatus();
     else await this.renderLog();
   }
@@ -167,6 +185,138 @@ export class S3SyncView extends ItemView {
       btn.addEventListener("click", () => void b.run());
       row.createDiv({ cls: "s3-sync-panel-action-desc", text: b.description });
     }
+  }
+
+  // ---- Overview -------------------------------------------------------------
+
+  private async renderOverview(): Promise<void> {
+    if (!this.plugin.isConfigured()) {
+      this.bodyEl.createDiv({ cls: "s3-sync-diff-empty", text: "Configure the connection first (Actions → Open settings)." });
+      return;
+    }
+    if (!this.overviewData) {
+      this.bodyEl.createDiv({ cls: "s3-sync-diff-empty", text: "Loading sync overview…" });
+      try {
+        const res = await this.plugin.computeOverview();
+        this.overviewData = res.data;
+        this.overviewLastSyncAt = res.lastSyncAt;
+      } catch (err) {
+        this.bodyEl.empty();
+        this.bodyEl.createDiv({ cls: "s3-sync-diff-empty", text: `Could not load: ${err instanceof Error ? err.message : String(err)}` });
+        return;
+      }
+    }
+    this.paintOverview();
+  }
+
+  private async refreshOverview(): Promise<void> {
+    this.overviewData = null;
+    await this.renderBody();
+  }
+
+  private paintOverview(): void {
+    const data = this.overviewData!;
+    this.bodyEl.empty();
+
+    const head = this.bodyEl.createDiv({ cls: "s3-sync-panel-headline" });
+    head.createSpan({
+      text: this.overviewLastSyncAt
+        ? `Last sync: ${new Date(this.overviewLastSyncAt).toLocaleString()}`
+        : "Not synced yet",
+    });
+    const refresh = this.bodyEl.createEl("button", { text: "Refresh", cls: "s3-sync-panel-refresh" });
+    refresh.addEventListener("click", () => void this.refreshOverview());
+
+    // Filter chips with counts (click to filter by status).
+    const chips = this.bodyEl.createDiv({ cls: "s3-sync-ov-chips" });
+    const total = data.rows.length;
+    this.chip(chips, "all", `All ${total}`, "list");
+    for (const st of STATUS_ORDER) {
+      if (data.counts[st] > 0) this.chip(chips, st, `${STATUS_META[st].label} ${data.counts[st]}`, STATUS_META[st].icon);
+    }
+
+    // Text filter.
+    const search = this.bodyEl.createEl("input", {
+      type: "text",
+      cls: "s3-sync-ov-search",
+      attr: { placeholder: "Filter by path…" },
+    });
+    search.value = this.overviewSearch;
+    search.addEventListener("input", () => {
+      this.overviewSearch = search.value;
+      this.paintOverviewList();
+    });
+
+    this.overviewListEl = this.bodyEl.createDiv({ cls: "s3-sync-ov-list" });
+    this.paintOverviewList();
+  }
+
+  private overviewListEl: HTMLElement | null = null;
+
+  private chip(container: HTMLElement, id: FileSyncStatus | "all", label: string, icon: string): void {
+    const chip = container.createEl("button", { cls: "s3-sync-ov-chip" });
+    chip.toggleClass("is-active", this.overviewFilter === id);
+    setIcon(chip.createSpan({ cls: "s3-sync-ov-chip-icon" }), icon);
+    chip.createSpan({ text: label });
+    chip.addEventListener("click", () => {
+      this.overviewFilter = id;
+      this.paintOverview(); // repaint chips (active state) + list
+    });
+  }
+
+  private paintOverviewList(): void {
+    const host = this.overviewListEl;
+    if (!host || !this.overviewData) return;
+    host.empty();
+
+    const q = this.overviewSearch.trim().toLowerCase();
+    const rows = this.overviewData.rows.filter(
+      (r) => (this.overviewFilter === "all" || r.status === this.overviewFilter) && (q === "" || r.path.toLowerCase().includes(q)),
+    );
+    if (rows.length === 0) {
+      host.createDiv({ cls: "s3-sync-diff-empty", text: "No files match." });
+      return;
+    }
+
+    // Group by parent folder, rendered as a lightweight indented tree.
+    const shown = rows.slice(0, MAX_OVERVIEW_ROWS);
+    let lastFolder: string | null = null;
+    for (const row of shown) {
+      const slash = row.path.lastIndexOf("/");
+      const folder = slash < 0 ? "" : row.path.slice(0, slash);
+      const name = slash < 0 ? row.path : row.path.slice(slash + 1);
+      if (folder !== lastFolder) {
+        lastFolder = folder;
+        host.createDiv({ cls: "s3-sync-ov-folder", text: folder === "" ? "/" : folder });
+      }
+      this.renderOverviewRow(host, row, name);
+    }
+    if (rows.length > shown.length) {
+      host.createDiv({ cls: "s3-sync-diff-empty", text: `…and ${rows.length - shown.length} more. Refine the filter.` });
+    }
+  }
+
+  private renderOverviewRow(host: HTMLElement, row: OverviewRow, name: string): void {
+    const el = host.createDiv({ cls: `s3-sync-ov-row s3-sync-ov-${row.status}` });
+    const icon = el.createSpan({ cls: "s3-sync-ov-icon" });
+    setIcon(icon, STATUS_META[row.status].icon);
+    // Tooltip: error reason for failures; last-sync time for synced; else a hint.
+    if (row.status === "failed") setTooltip(icon, row.reason ?? "Sync error");
+    else if (row.status === "synced") {
+      setTooltip(icon, this.overviewLastSyncAt ? `Synced — last sync ${new Date(this.overviewLastSyncAt).toLocaleString()}` : "Synced");
+    } else setTooltip(icon, STATUS_META[row.status].hint);
+
+    el.createSpan({ cls: "s3-sync-ov-name", text: name });
+
+    el.addEventListener("click", () => {
+      if (row.status === "failed") {
+        // Same as clicking Resolve in the Log tab.
+        void this.plugin.openResolveLatest();
+      } else {
+        // Open the file if it exists locally.
+        void this.plugin.app.workspace.openLinkText(row.path, "", false);
+      }
+    });
   }
 
   // ---- Status ---------------------------------------------------------------

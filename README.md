@@ -87,6 +87,10 @@ encryption. Works on desktop and mobile.
 - **Right-sidebar panel** — a cloud icon in the ribbon opens a panel with
   tabbed action buttons (Sync now, Version history, Resolve, Log, Test,
   Reset, Settings), a live status tab, and a recent-runs log.
+- **Overview tab** — a per-file sync map: every file is classified as synced,
+  modified, failed, server-only, or local-only, grouped by folder. Filter by
+  status or path; hover a status icon for the last-sync time (synced) or the
+  error (failed); click a failed file to open the Resolve window.
 
 ## Install with BRAT
 
