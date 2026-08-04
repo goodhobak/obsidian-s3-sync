@@ -1,7 +1,7 @@
 {
   "id": "s3-sync",
   "name": "S3 Sync",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "minAppVersion": "1.4.0",
   "description": "Sync your vault with any S3-compatible storage (RustFS, MinIO, AWS S3, R2). Optional end-to-end encryption. No sync server required.",
   "author": "goodhobak",
