@@ -57,8 +57,9 @@ encryption. Works on desktop and mobile.
   and contents stay hidden.)
 - **Filtering** — markdown always syncs; images/audio/video/PDF by default;
   other extensions opt-in; a searchable folder-exclusion list (with an
-  "include subfolders" option and an Apply button); max file size; hidden
-  files never sync.
+  "include subfolders" option and an Apply button); per-device single-file
+  exclusions (toggled from the Overview tab, managed in settings); max file
+  size; hidden files never sync.
 - **Optional `.obsidian` config sync** — sync your plugins, themes, snippets
   and settings across devices. This plugin's own folder and per-device
   workspace layout are always excluded, so your S3 credentials and passphrase
@@ -88,9 +89,38 @@ encryption. Works on desktop and mobile.
   tabbed action buttons (Sync now, Version history, Resolve, Log, Test,
   Reset, Settings), a live status tab, and a recent-runs log.
 - **Overview tab** — a per-file sync map: every file is classified as synced,
-  modified, failed, server-only, or local-only, grouped by folder. Filter by
-  status or path; hover a status icon for the last-sync time (synced) or the
-  error (failed); click a failed file to open the Resolve window.
+  modified, failed, server-only, local-only, or excluded, grouped by folder.
+  Filter by status or path; hover a status icon for the last-sync time (synced)
+  or the error (failed); click a failed file to open the Resolve window; use
+  the ⊘ / + button on any row to exclude the file from sync on this device or
+  include it again.
+
+## Release notes
+
+### 0.13.0 — per-device file exclusions
+
+On phones, syncing a handful of very large files could crash the app
+mid-download (the OS kills Obsidian when a download plus decryption exceeds
+memory). The only workaround was excluding a whole folder — too blunt when one
+video sits next to notes you still want.
+
+- **Exclude a single file from the Overview tab** — every row in the S3 Sync
+  panel's Overview tab now has an exclude (⊘) toggle. Excluded files show a
+  muted **Excluded** status with their own filter chip, and the + button on an
+  excluded row brings the file back into sync. Server-only files can be
+  excluded too, so a file that keeps crashing a phone never gets downloaded
+  there in the first place.
+- **Per-device by design** — plugin settings never sync, so an exclusion made
+  on your phone only affects that phone; desktops keep syncing the file
+  untouched.
+- **Managed in settings** — folder and file exclusions now live together under
+  collapsible **Exclusions** groups in the plugin settings. Files excluded from
+  the Overview tab appear in the *Excluded files* list, where removing an entry
+  syncs it again.
+- **Safe on already-synced files** — excluding a file makes this device
+  *forget* it, never delete it: no tombstone is written, the server copy stays,
+  and other devices are unaffected. Excluding a file also clears its stale
+  failure entry from the overview.
 
 ## Install with BRAT
 
