@@ -323,6 +323,9 @@ export default class S3SyncPlugin extends Plugin {
    */
   async computeOverview(): Promise<{ data: OverviewData; lastSyncAt: number | null }> {
     const filters = this.effectiveFilters();
+    // Scan with per-file exclusions ignored so excluded local files still show
+    // up in the overview (with the "excluded" status) and can be re-included.
+    const scanFilters = { ...filters, excludedFiles: [] };
 
     // Local files as the engine sees them (includes .obsidian config when on).
     const files = new ObsidianVaultFiles(
@@ -332,7 +335,7 @@ export default class S3SyncPlugin extends Plugin {
     );
     const local = new Map<string, { mtime: number; size: number }>();
     for (const f of await files.listFiles()) {
-      if (!isSyncablePath(f.path, filters)) continue;
+      if (!isSyncablePath(f.path, scanFilters)) continue;
       if (filters.maxFileSize > 0 && f.size > filters.maxFileSize) continue;
       local.set(f.path, { mtime: f.mtime, size: f.size });
     }
@@ -350,8 +353,27 @@ export default class S3SyncPlugin extends Plugin {
     for (const [p, e] of Object.entries(manifest.files)) if (!e.deletedAt) remoteLive.add(p);
 
     const failures = new Map(this.lastFailures.map((f) => [f.path, f.reason]));
+    const excluded = new Set(this.settings.filters.excludedFiles);
 
-    return { data: classifyOverview({ local, indexed, remoteLive, failures }), lastSyncAt: this.status.lastSyncAt };
+    return {
+      data: classifyOverview({ local, indexed, remoteLive, failures, excluded }),
+      lastSyncAt: this.status.lastSyncAt,
+    };
+  }
+
+  // ---- per-device file exclusions -------------------------------------------
+
+  isFileExcluded(path: string): boolean {
+    return this.settings.filters.excludedFiles.includes(path);
+  }
+
+  /** Add or remove a single file from this device's exclusion list. */
+  async setFileExcluded(path: string, excluded: boolean): Promise<void> {
+    const current = new Set(this.settings.filters.excludedFiles);
+    if (excluded) current.add(path);
+    else current.delete(path);
+    this.settings.filters.excludedFiles = [...current].sort();
+    await this.saveSettings();
   }
 
   async syncNow(trigger: "manual" | "auto" | "interval" | "startup"): Promise<void> {

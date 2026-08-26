@@ -17,6 +17,12 @@ export interface SyncFilterSettings {
   extensions: string[];
   /** Folder paths (vault-relative) excluded from sync. */
   excludedFolders: string[];
+  /**
+   * Individual file paths (vault-relative) excluded from sync. Settings are
+   * per-device (data.json never syncs), so this only affects this device —
+   * e.g. skip one huge video on a phone while desktops keep syncing it.
+   */
+  excludedFiles: string[];
   /** Maximum file size in bytes; 0 = unlimited. */
   maxFileSize: number;
   /**
@@ -62,6 +68,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   filters: {
     extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "mp3", "wav", "m4a", "ogg", "mp4", "webm", "mov", "pdf"],
     excludedFolders: [],
+    excludedFiles: [],
     maxFileSize: 0,
     syncObsidianConfig: false,
   },

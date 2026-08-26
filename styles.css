@@ -381,3 +381,73 @@
 .s3-sync-ov-localOnly .s3-sync-ov-icon {
   color: var(--color-purple, #a77bf0);
 }
+.s3-sync-ov-excluded .s3-sync-ov-icon,
+.s3-sync-ov-excluded .s3-sync-ov-name {
+  color: var(--text-faint);
+}
+
+/* Per-row exclude/include toggle in the overview list. */
+.s3-sync-ov-action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 4px;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.s3-sync-ov-action:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.s3-sync-ov-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Collapsible exclusion groups in settings (folders / per-device files). */
+.s3-sync-excl-group {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.s3-sync-excl-summary {
+  cursor: pointer;
+  font-weight: var(--font-semibold);
+  user-select: none;
+}
+
+.s3-sync-excl-body {
+  padding-top: 8px;
+}
+
+.s3-sync-file-list .s3-sync-folder-row {
+  justify-content: space-between;
+}
+
+.s3-sync-file-path {
+  word-break: break-all;
+  font-size: var(--font-ui-small);
+}
+
+.s3-sync-file-remove {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px 4px;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.s3-sync-file-remove:hover {
+  color: var(--text-error);
+  background: var(--background-modifier-hover);
+}

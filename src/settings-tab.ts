@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, TFolder } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, TFolder, setIcon, setTooltip } from "obsidian";
 import type S3SyncPlugin from "./main";
 import { toggleFolderExclusion } from "./sync/filters";
 import type { SyncStatus } from "./types";
@@ -10,6 +10,9 @@ export class S3SyncSettingTab extends PluginSettingTab {
   private includeSubfolders = false;
   /** Staged exclusion set — committed to settings only when Apply is pressed. */
   private pendingExcluded: Set<string> | null = null;
+  /** Collapsible exclusion groups — open state survives re-renders of the tab. */
+  private exclFoldersOpen = false;
+  private exclFilesOpen = false;
 
   constructor(
     app: App,
@@ -157,7 +160,7 @@ export class S3SyncSettingTab extends PluginSettingTab {
         }),
       );
 
-    this.renderExcludedFolders(containerEl);
+    this.renderExclusions(containerEl);
 
     new Setting(containerEl)
       .setName("Maximum file size (MB)")
@@ -394,6 +397,86 @@ export class S3SyncSettingTab extends PluginSettingTab {
     this.renderProgress(this.plugin.getStatus());
   }
 
+  // ---- exclusions (grouped: folders + per-device files) ---------------------
+
+  private renderExclusions(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Exclusions")
+      .setDesc(
+        "Skip folders or individual files. Lists live on this device only — " +
+          "other devices keep syncing everything (useful to skip one huge file on a phone).",
+      );
+
+    const folders = this.exclusionGroup(containerEl, "Excluded folders", this.exclFoldersOpen, (open) => {
+      this.exclFoldersOpen = open;
+    });
+    this.renderExcludedFolders(folders.body, folders.count);
+
+    const files = this.exclusionGroup(containerEl, "Excluded files", this.exclFilesOpen, (open) => {
+      this.exclFilesOpen = open;
+    });
+    this.renderExcludedFiles(files.body, files.count);
+  }
+
+  private exclusionGroup(
+    containerEl: HTMLElement,
+    name: string,
+    open: boolean,
+    onToggle: (open: boolean) => void,
+  ): { body: HTMLElement; count: HTMLElement } {
+    const details = containerEl.createEl("details", { cls: "s3-sync-excl-group" });
+    details.open = open;
+    details.addEventListener("toggle", () => onToggle(details.open));
+    const summary = details.createEl("summary", { cls: "s3-sync-excl-summary" });
+    summary.createSpan({ text: name });
+    const count = summary.createSpan({ cls: "s3-sync-folder-count" });
+    const body = details.createDiv({ cls: "s3-sync-excl-body" });
+    return { body, count };
+  }
+
+  // ---- excluded files (per-device list, populated from the Overview tab) ----
+
+  private renderExcludedFiles(host: HTMLElement, countEl: HTMLElement): void {
+    host.createDiv({
+      cls: "setting-item-description",
+      text:
+        "Files skipped on this device. Add files from the S3 Sync panel → Overview tab " +
+        "(the ⊘ button on a row); remove one here to sync it again.",
+    });
+    const list = host.createDiv({ cls: "s3-sync-folder-list s3-sync-file-list" });
+
+    const render = (): void => {
+      list.empty();
+      const files = this.plugin.settings.filters.excludedFiles;
+      countEl.setText(` — ${files.length}`);
+      if (files.length === 0) {
+        list.createDiv({
+          cls: "s3-sync-folder-empty",
+          text: "No files excluded on this device.",
+        });
+        return;
+      }
+      for (const path of files) {
+        const row = list.createDiv({ cls: "s3-sync-folder-row" });
+        row.createSpan({ cls: "s3-sync-file-path", text: path });
+        const remove = row.createEl("button", {
+          cls: "s3-sync-file-remove",
+          attr: { "aria-label": "Include in sync again" },
+        });
+        setIcon(remove, "x");
+        setTooltip(remove, "Include this file in sync again");
+        remove.addEventListener("click", () => {
+          void (async () => {
+            await this.plugin.setFileExcluded(path, false);
+            render();
+            await this.refreshStatistics(); // exclusions change the syncable count
+          })();
+        });
+      }
+    };
+    render();
+  }
+
   // ---- excluded folders (searchable checkbox list) --------------------------
 
   private allFolders(): string[] {
@@ -411,16 +494,14 @@ export class S3SyncSettingTab extends PluginSettingTab {
     return new Set(this.plugin.settings.filters.excludedFolders.map((f) => f.replace(/^\/+|\/+$/g, "")));
   }
 
-  private renderExcludedFolders(containerEl: HTMLElement): void {
+  private renderExcludedFolders(containerEl: HTMLElement, countEl: HTMLElement): void {
     // Start staging from the currently-saved exclusions.
     this.pendingExcluded = this.savedExclusionSet();
 
-    const heading = new Setting(containerEl)
-      .setName("Excluded folders")
-      .setDesc("Check folders to skip, then press Apply. Use the search box to narrow a large vault.");
-
-    // Live count label in the heading (updates as you stage / apply).
-    const countEl = heading.nameEl.createSpan({ cls: "s3-sync-folder-count" });
+    containerEl.createDiv({
+      cls: "setting-item-description",
+      text: "Check folders to skip, then press Apply. Use the search box to narrow a large vault.",
+    });
 
     new Setting(containerEl)
       .setName("Include subfolders")

@@ -117,6 +117,44 @@ describe("SyncEngine", () => {
     expect(check.pulled).toBe(1); // remote copy still exists
   });
 
+  it("does not treat per-file exclusions as deletions (device-local skip)", async () => {
+    a.vault.write("media/big.mp4", "HUGE");
+    a.vault.write("notes/n.md", "n");
+    await sync(a);
+
+    // Same vault, new device state that excludes the file: it must be forgotten
+    // locally, never tombstoned remotely.
+    const excluding = makeDevice(s3);
+    const filtered = new SyncEngine(
+      a.vault,
+      excluding.remote,
+      new InMemoryIndexStore(),
+      { ...filters, excludedFiles: ["media/big.mp4"] },
+      { versionsToKeep: 5, massDeleteThreshold: 0.5 },
+      { confirmMassDelete: async () => true },
+    );
+    await excluding.remote.initialize();
+    const res = await filtered.syncOnce();
+    expect(res.deletedRemote).toBe(0);
+
+    // Another device still pulls both files — the remote copy survived.
+    const check = await sync(b);
+    expect(check.pulled).toBe(2);
+    expect(b.vault.read("media/big.mp4")).toBe("HUGE");
+  });
+
+  it("an excluded remote file is not downloaded on this device", async () => {
+    a.vault.write("media/big.mp4", "HUGE");
+    a.vault.write("notes/n.md", "n");
+    await sync(a);
+
+    const c = makeDevice(s3, { filterOverride: { ...filters, excludedFiles: ["media/big.mp4"] } });
+    const res = await sync(c);
+    expect(res.pulled).toBe(1);
+    expect(c.vault.read("media/big.mp4")).toBeNull();
+    expect(c.vault.read("notes/n.md")).toBe("n");
+  });
+
   it("creates a conflict copy for divergent binary-ish edits", async () => {
     a.vault.write("c.md", "base\n");
     await sync(a);

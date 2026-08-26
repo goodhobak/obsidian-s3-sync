@@ -134,7 +134,7 @@ function device(root: VaultFiles, prefix: string) {
     root,
     remote,
     new InMemoryIndexStore(),
-    { extensions: [], excludedFolders: [], maxFileSize: 0, syncObsidianConfig: false }, // markdown-only
+    { extensions: [], excludedFolders: [], excludedFiles: [], maxFileSize: 0, syncObsidianConfig: false }, // markdown-only
     { versionsToKeep: 3, massDeleteThreshold: 0.5 },
     { confirmMassDelete: async () => false }, // never allow deletes in this test
   );

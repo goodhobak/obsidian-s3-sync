@@ -96,6 +96,11 @@ export function isSyncablePath(path: string, filters: SyncFilterSettings): boole
     if (normalized && (path === normalized || path.startsWith(normalized + "/"))) return false;
   }
 
+  for (const file of filters.excludedFiles) {
+    const normalized = file.replace(/^\/+|\/+$/g, "");
+    if (normalized && path === normalized) return false;
+  }
+
   if (isConfig) return true; // config files sync regardless of extension
   const ext = extensionOf(path);
   if (ext === "md") return true;

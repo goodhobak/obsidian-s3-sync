@@ -1,5 +1,5 @@
 /** Per-file sync status for the overview tab. */
-export type FileSyncStatus = "synced" | "modified" | "failed" | "remoteOnly" | "localOnly";
+export type FileSyncStatus = "synced" | "modified" | "failed" | "remoteOnly" | "localOnly" | "excluded";
 
 export interface OverviewRow {
   path: string;
@@ -22,12 +22,14 @@ export interface OverviewInputs {
   remoteLive: Set<string>;
   /** Paths that failed in the most recent sync: path -> reason. */
   failures: Map<string, string>;
+  /** Files excluded from sync on this device (settings never sync, so per-device). */
+  excluded?: Set<string>;
 }
 
 /**
  * Classify every file into one status without hashing (uses mtime+size against
- * the index). Precedence: failed > (both sides: synced/modified) > remote-only
- * > local-only. Pure and deterministic for unit testing.
+ * the index). Precedence: excluded > failed > (both sides: synced/modified) >
+ * remote-only > local-only. Pure and deterministic for unit testing.
  */
 export function classifyOverview(inp: OverviewInputs): OverviewData {
   const counts: Record<FileSyncStatus, number> = {
@@ -36,6 +38,7 @@ export function classifyOverview(inp: OverviewInputs): OverviewData {
     failed: 0,
     remoteOnly: 0,
     localOnly: 0,
+    excluded: 0,
   };
   const rows: OverviewRow[] = [];
   const paths = new Set<string>([...inp.local.keys(), ...inp.remoteLive, ...inp.failures.keys()]);
@@ -43,7 +46,10 @@ export function classifyOverview(inp: OverviewInputs): OverviewData {
   for (const path of paths) {
     let status: FileSyncStatus;
     let reason: string | undefined;
-    if (inp.failures.has(path)) {
+    if (inp.excluded?.has(path)) {
+      // Excluding a file also silences its stale failure entry.
+      status = "excluded";
+    } else if (inp.failures.has(path)) {
       status = "failed";
       reason = inp.failures.get(path);
     } else {

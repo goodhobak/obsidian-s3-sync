@@ -13,8 +13,9 @@ const STATUS_META: Record<FileSyncStatus, { label: string; icon: string; hint: s
   failed: { label: "Failed", icon: "alert-circle", hint: "Sync error — click to resolve" },
   remoteOnly: { label: "Server only", icon: "cloud-download", hint: "On the server, not downloaded yet" },
   localOnly: { label: "Local only", icon: "cloud-upload", hint: "Local only — uploads on next sync" },
+  excluded: { label: "Excluded", icon: "circle-slash", hint: "Excluded from sync on this device" },
 };
-const STATUS_ORDER: FileSyncStatus[] = ["failed", "remoteOnly", "localOnly", "modified", "synced"];
+const STATUS_ORDER: FileSyncStatus[] = ["failed", "remoteOnly", "localOnly", "modified", "synced", "excluded"];
 const MAX_OVERVIEW_ROWS = 400;
 
 interface ActionButton {
@@ -307,6 +308,23 @@ export class S3SyncView extends ItemView {
     } else setTooltip(icon, STATUS_META[row.status].hint);
 
     el.createSpan({ cls: "s3-sync-ov-name", text: name });
+
+    // Per-device exclude/include toggle. Also listed (and removable) in
+    // Settings → What to sync → Excluded files.
+    const isExcluded = row.status === "excluded";
+    const toggle = el.createEl("button", {
+      cls: "s3-sync-ov-action",
+      attr: { "aria-label": isExcluded ? "Include in sync" : "Exclude from sync" },
+    });
+    setIcon(toggle, isExcluded ? "plus-circle" : "circle-slash");
+    setTooltip(toggle, isExcluded ? "Include this file in sync again" : "Exclude this file from sync on this device");
+    toggle.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      void (async () => {
+        await this.plugin.setFileExcluded(row.path, !isExcluded);
+        await this.refreshOverview(); // recompute statuses + chip counts
+      })();
+    });
 
     el.addEventListener("click", () => {
       if (row.status === "failed") {

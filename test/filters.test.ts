@@ -44,6 +44,15 @@ describe("isSyncablePath", () => {
   it("respects max size in the scanner, not here (path-only check)", () => {
     expect(isSyncablePath("big/file.md", { ...filters, maxFileSize: 1 })).toBe(true);
   });
+
+  it("applies excluded files as exact matches with slash normalization", () => {
+    const f = { ...filters, excludedFiles: ["media/big.mp4", "/slashed.md/"] };
+    expect(isSyncablePath("media/big.mp4", f)).toBe(false);
+    expect(isSyncablePath("slashed.md", f)).toBe(false);
+    expect(isSyncablePath("media/big.mp4.md", f)).toBe(true); // prefix, not the file
+    expect(isSyncablePath("media/other.mp4", f)).toBe(true);
+    expect(isSyncablePath("big.mp4", f)).toBe(true); // different folder
+  });
 });
 
 describe("extensionOf", () => {

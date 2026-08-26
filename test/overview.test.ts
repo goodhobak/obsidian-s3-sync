@@ -71,6 +71,25 @@ describe("classifyOverview", () => {
     expect(rows[0]!.status).toBe("modified");
   });
 
+  it("excluded takes precedence over everything, including failures", () => {
+    const { rows, counts } = classifyOverview(
+      inputs({
+        local: new Map([
+          ["big.mp4", { mtime: 1, size: 1 }],
+          ["ok.md", { mtime: 1, size: 1 }],
+        ]),
+        remoteLive: new Set(["big.mp4", "server.mp4", "ok.md"]),
+        failures: new Map([["big.mp4", "too large"]]), // stale failure is silenced
+        excluded: new Set(["big.mp4", "server.mp4"]),
+      }),
+    );
+    expect(counts.excluded).toBe(2);
+    expect(counts.failed).toBe(0);
+    expect(rows.find((r) => r.path === "big.mp4")!.status).toBe("excluded");
+    expect(rows.find((r) => r.path === "server.mp4")!.status).toBe("excluded"); // remote-only excluded
+    expect(rows.find((r) => r.path === "ok.md")!.status).toBe("modified");
+  });
+
   it("sorts rows by path and counts the union", () => {
     const { rows } = classifyOverview(
       inputs({
